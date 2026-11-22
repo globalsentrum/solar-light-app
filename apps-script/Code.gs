@@ -786,7 +786,8 @@ function buildReportPdf_(user, ids, reportId) {
       idx = body.getChildIndex(para);
       para.asParagraph().setText('');
     } else {
-      idx = body.getNumChildren();
+      // template has no {{CONTENT}}: add an empty paragraph at the end and insert before it
+      idx = body.getChildIndex(body.appendParagraph(''));
     }
     ids.forEach(function (id, n) {
       var pole = getPole_(poles, id);
@@ -815,7 +816,8 @@ function buildReportPdf_(user, ids, reportId) {
           img.setWidth(Math.round(w * scale)).setHeight(Math.round(hgt * scale));
         }
         photoCaption_(slot, photo, names).forEach(function (line, li) {
-          var p = li === 0 && !photo ? first.setText(line) : cell.appendParagraph(line);
+          var p;
+          if (li === 0 && !photo) { first.setText(line); p = first; } else { p = cell.appendParagraph(line); }
           p.editAsText().setFontSize(li === 0 ? 10 : 8).setBold(li === 0);
         });
       });
@@ -890,7 +892,9 @@ function createTemplateDoc_() {
   var doc = DocumentApp.create('Solar Report Template');
   var body = doc.getBody();
   body.setMarginTop(36).setMarginBottom(36).setMarginLeft(54).setMarginRight(54);
-  body.getChild(0).asParagraph().setText('{{PROJECT}}').setHeading(DocumentApp.ParagraphHeading.HEADING2);
+  var first = body.getChild(0).asParagraph();
+  first.setText('{{PROJECT}}'); // Paragraph.setText() returns nothing: do not chain
+  first.setHeading(DocumentApp.ParagraphHeading.HEADING2);
   body.appendParagraph('Laporan Kemajuan Pemasangan Lampu Jalan Solar').setHeading(DocumentApp.ParagraphHeading.HEADING1);
   body.appendParagraph('No. laporan: {{REPORTID}}    Dijana: {{GENERATED}}    Oleh: {{USER}}');
   body.appendParagraph('{{CONTENT}}');

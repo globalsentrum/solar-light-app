@@ -431,6 +431,13 @@ test('PDF report: multiple photos per slot, with and without admin selection; ca
   assert.equal(rows('AuditLog').filter((r) => r.Action === 'ReportGenerated').length, 2);
   assert.equal(call(BOSS, 'bootstrap').reports.length, 2);
 
+  // template without {{CONTENT}} still works
+  const tplId = rt.state.sheets.Settings.rowsAsObjects().find((r) => r.Key === 'TemplateDocID').Value;
+  rt.state.docs[tplId].body = rt.state.docs[tplId].body.filter((n) => !(n.text || '').includes('{{CONTENT}}'));
+  const noTpl = admin('generateReport', { poleIds: ['SL-046'] });
+  assert.equal(noTpl.ok, true, noTpl.error);
+  assert.equal(reportImages(rt, noTpl.report.ReportID).sections.length, 1);
+
   // limit (ReportMaxPoles = 10)
   const eleven = Array.from({ length: 11 }, (_, i) => 'SL-0' + (34 + i));
   assert.equal(admin('generateReport', { poleIds: eleven }).code, 'BAD');

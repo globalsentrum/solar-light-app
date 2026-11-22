@@ -121,9 +121,17 @@ function createRuntime(opts) {
   };
 
   // ---------------- Documents (records structure; "PDF" = JSON of it) ----------------
+  // STRICT: any Docs method not implemented here throws, so the backend can only use methods
+  // whose real return values we have copied (e.g. Paragraph.setText returns nothing).
   function chain(target) {
-    return new Proxy(target, { get(t, k) { if (k in t) return t[k]; return () => chain(t); } });
+    return new Proxy(target, {
+      get(t, k) {
+        if (k in t || typeof k === 'symbol' || k === 'then' || k === 'toJSON') return t[k];
+        throw new Error('Docs mock: method "' + String(k) + '" not implemented — check the real Apps Script API');
+      },
+    });
   }
+  const textObj = () => { const o = chain({ setFontSize: () => o, setBold: () => o }); return o; };
   function jpegSize(buf) {
     // minimal SOF parser so InlineImage reports real width/height
     let i = 2;
@@ -143,11 +151,11 @@ function createRuntime(opts) {
   function wrapParagraph(node) {
     const p = chain({
       _node: node,
-      setText(t) { node.text = t; return p; },
+      setText(t) { node.text = t; return undefined; }, // real API returns void
       getText() { return node.text; },
       setHeading(h) { node.heading = h; return p; },
       asParagraph() { return p; },
-      editAsText() { return chain({}); },
+      editAsText() { return textObj(); },
       appendInlineImage(blob) {
         const sz = blob.buf[0] === 0xff ? jpegSize(blob.buf) : { w: 1600, h: 1200 };
         const img = { name: blob.name, w: sz.w, h: sz.h };
@@ -170,10 +178,12 @@ function createRuntime(opts) {
       appendParagraph: (t) => makeParagraph(children, t),
       insertParagraph(i, t) { const n = { type: 'p', text: t, images: [] }; children.splice(i, 0, n); return wrapParagraph(n); },
       insertPageBreak(i) { children.splice(i, 0, { type: 'pagebreak' }); return chain({}); },
+      setMarginTop() { return body; }, setMarginBottom() { return body; }, setMarginLeft() { return body; }, setMarginRight() { return body; },
       insertTable(i, cells) {
         const n = { type: 'table', rows: cells.map((r) => r.map((c) => ({ paras: [{ type: 'p', text: c, images: [] }] }))) };
         children.splice(i, 0, n);
         const tbl = chain({
+          setBorderWidth: () => tbl,
           getRow: (ri) => chain({
             getCell: (ci) => {
               const cell = n.rows[ri][ci];
