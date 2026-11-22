@@ -100,9 +100,17 @@ Jangan ubah `PhotosFolderID`, `ReportsFolderID`, `TemplateDocID`.
 ## Langkah 7 — GitHub: isi config & hidupkan GitHub Pages
 
 1. Buka repo di GitHub → folder `docs/js/` → fail **`config.js`** → ikon ✏️ (Edit).
-2. Ganti:
+2. Ganti teks dalam **tanda petikan** pada dua baris di bahagian BAWAH fail (bukan dalam komen `/* … */` di atas):
    - `PASTE_APPS_SCRIPT_WEB_APP_URL_HERE` → **API_URL**
    - `PASTE_GOOGLE_OAUTH_CLIENT_ID_HERE` → **CLIENT_ID**
+
+   Hasilnya mesti kelihatan begini (tanda petikan `'` dan koma dikekalkan):
+   ```js
+   window.SOLAR_CONFIG = {
+     API_URL: 'https://script.google.com/macros/s/AKfy...../exec',
+     CLIENT_ID: '1234567890-abc....apps.googleusercontent.com'
+   };
+   ```
 3. **Commit changes…** → **Commit changes**.
 4. Repo mesti **Public**: **Settings → General** → bawah sekali "Danger Zone" → *Change visibility* → Public.
    (GitHub Pages percuma memerlukan repo awam. Data tiang & gambar TIDAK berada dalam repo.)

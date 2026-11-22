@@ -510,3 +510,21 @@ test('camera photo end-to-end without location permission stamps "GPS tidak ters
   assert.equal(p.Latitude, '');
   await close();
 });
+
+test('installed app picks up config.js edited later on GitHub (network-first), and still opens offline', async () => {
+  const { page, base, ctx, srv, close } = await setup('team@example.com');
+  await page.goto(base + '/#/dashboard');
+  await page.waitForSelector('.stats');
+  await page.waitForFunction(() => navigator.serviceWorker && navigator.serviceWorker.controller);
+  assert.equal(await page.evaluate(() => window.SOLAR_CONFIG.marker), 'v1');
+  srv.flags.configMarker = 'v2'; // admin edits config.js on GitHub; sw.js unchanged
+  await page.reload();
+  await page.waitForSelector('.stats');
+  assert.equal(await page.evaluate(() => window.SOLAR_CONFIG.marker), 'v2');
+  await ctx.setOffline(true);
+  await page.reload();
+  await page.waitForSelector('.stats');
+  assert.equal(await page.evaluate(() => window.SOLAR_CONFIG.marker), 'v2', 'cached copy used offline');
+  await ctx.setOffline(false);
+  await close();
+});

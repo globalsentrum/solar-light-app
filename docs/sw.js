@@ -3,7 +3,7 @@
  * VERSION is stamped by `npm run build` so phones pick up new versions automatically.
  * API calls (Apps Script) and Google sign-in are never cached here — data lives in IndexedDB.
  */
-const VERSION = 'fd2881a8d7';
+const VERSION = '6491e2cb3a';
 const CACHE = 'solar-shell-' + VERSION;
 const SHELL = [
   './', 'index.html', 'css/app.css', 'js/config.js', 'js/logic.js', 'js/db.js', 'js/api.js', 'js/watermark.js',
@@ -30,5 +30,25 @@ self.addEventListener('fetch', (e) => {
     e.respondWith(caches.match('index.html').then((r) => r || fetch(req)));
     return;
   }
+  if (url.pathname.endsWith('/js/config.js')) {
+    // Settings can be edited directly on GitHub: always try the network first (3 s), fall back to cache offline.
+    e.respondWith(networkFirst(req, 3000));
+    return;
+  }
   e.respondWith(caches.match(req, { ignoreSearch: true }).then((r) => r || fetch(req)));
 });
+
+function networkFirst(req, timeoutMs) {
+  return new Promise((resolve) => {
+    let done = false;
+    const fallback = () => caches.match(req, { ignoreSearch: true }).then((r) => r || fetch(req));
+    const timer = setTimeout(() => { if (!done) { done = true; resolve(fallback()); } }, timeoutMs);
+    fetch(req, { cache: 'no-store' }).then((res) => {
+      if (res.ok) {
+        const copy = res.clone(); // clone NOW, before the page reads the body
+        caches.open(CACHE).then((c) => c.put(req, copy));
+      }
+      if (!done) { done = true; clearTimeout(timer); resolve(res.ok ? res : fallback()); }
+    }, () => { if (!done) { done = true; clearTimeout(timer); resolve(fallback()); } });
+  });
+}

@@ -22,7 +22,7 @@ function start(port) {
   rt.g.handle_({ action: 'saveUser', token: tok('admin@example.com'), email: 'boss@example.com', name: 'Bos', role: 'Boss' });
   rt.g.handle_({ action: 'saveUser', token: tok('admin@example.com'), email: 'admin@example.com', name: 'Admin Satu', role: 'Admin' });
 
-  const flags = { down: false, dropNextResponse: 0, calls: [] };
+  const flags = { down: false, dropNextResponse: 0, calls: [], configMarker: 'v1' };
 
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://x');
@@ -54,6 +54,7 @@ function start(port) {
       if (what === 'sheet') return send(rt.state.sheets[url.searchParams.get('name')].rowsAsObjects());
       if (what === 'flags') {
         ['down'].forEach((k) => { if (url.searchParams.has(k)) flags[k] = url.searchParams.get(k) === '1'; });
+        if (url.searchParams.has('configMarker')) flags.configMarker = url.searchParams.get('configMarker');
         if (url.searchParams.has('dropNextResponse')) flags.dropNextResponse = Number(url.searchParams.get('dropNextResponse'));
         return send({ down: flags.down, dropNextResponse: flags.dropNextResponse, calls: flags.calls });
       }
@@ -66,7 +67,7 @@ function start(port) {
     if (!file.startsWith(DOCS) || !fs.existsSync(file)) { res.writeHead(404); return res.end('not found'); }
     let data = fs.readFileSync(file);
     if (p === '/js/config.js') {
-      data = Buffer.from(`window.SOLAR_CONFIG = { API_URL: 'http://localhost:${server.address().port}/api', CLIENT_ID: 'test-client' };`);
+      data = Buffer.from(`window.SOLAR_CONFIG = { API_URL: 'http://localhost:${server.address().port}/api', CLIENT_ID: 'test-client', marker: '${flags.configMarker}' };`);
     }
     res.writeHead(200, { 'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-store' });
     res.end(data);
