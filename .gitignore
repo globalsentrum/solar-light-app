@@ -1,0 +1,6 @@
+node_modules/
+test-output/
+# PRIVATE project data — never commit (repo is public for GitHub Pages)
+data/
+apps-script/SeedData.gs
+*.xlsx

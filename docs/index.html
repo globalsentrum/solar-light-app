@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="ms">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Lampu Solar Karak</title>
+  <meta name="theme-color" content="#0b5d3b">
+  <meta name="description" content="Rekod kerja pemasangan lampu jalan solar — Lebuhraya KL–Karak Package 2A">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Lampu Solar">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <header id="topbar">
+    <button id="backBtn" class="icon-btn" aria-label="Kembali" hidden>‹</button>
+    <div id="title">Lampu Solar</div>
+    <button id="syncBtn" class="sync ok" aria-live="polite">✅ Semua disimpan</button>
+  </header>
+  <div id="banner" hidden></div>
+  <main id="view"><div class="center muted">Memuatkan…</div></main>
+  <nav id="tabs" hidden>
+    <a href="#/dashboard" data-tab="dashboard"><span>📊</span>Dashboard</a>
+    <a href="#/jadual" data-tab="jadual"><span>📋</span>Jadual</a>
+    <a href="#/laporan" data-tab="laporan"><span>📄</span>Laporan</a>
+    <a href="#/admin" data-tab="admin" hidden><span>⚙️</span>Admin</a>
+  </nav>
+
+  <!-- Hidden file inputs (kept in the DOM — required for iPhone) -->
+  <input id="inCamera" type="file" accept="image/*" capture="environment" hidden>
+  <input id="inGallery" type="file" accept="image/*" hidden>
+
+  <div id="sheet" class="sheet" hidden></div>
+  <div id="overlay" class="overlay" hidden><div class="overlay-box"><div class="spinner"></div><div id="overlayText"></div></div></div>
+  <div id="toast" hidden></div>
+
+  <script src="js/config.js"></script>
+  <script src="js/logic.js"></script>
+  <script src="lib/exifr.umd.js"></script>
+  <script src="js/db.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/watermark.js"></script>
+  <script src="js/sync.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
