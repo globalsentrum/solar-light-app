@@ -9,7 +9,11 @@ Semua perkhidmatan adalah **percuma** (Google Sheets, Drive, Apps Script, Google
 
 Anda perlukan:
 - Repo GitHub: `https://github.com/globalsentrum/solar-light-app`
-- Fail peribadi **`SeedData.gs`** (diberi berasingan, BUKAN dalam GitHub, kerana mengandungi senarai 123 tiang)
+- Fail peribadi **`SeedData.gs`** (diberi berasingan, BUKAN dalam GitHub, kerana mengandungi senarai 123 tiang).
+  Hanya diperlukan untuk **Google Sheet baru**.
+
+> **Sudah guna versi 1 (slot 1–7, ID SL-001)?** Jangan buat Langkah 1–10 semula.
+> Ikut bahagian **"Kemas kini ke versi 2"** di bawah sekali.
 
 ---
 
@@ -37,13 +41,15 @@ Anda perlukan:
 3. Tetingkap "Authorization required" → **Review permissions** → pilih akaun admin.
 4. Skrin "Google hasn't verified this app" → klik **Advanced** → **Go to Solar Karak API (unsafe)** → **Allow**.
    (Ini normal: aplikasi ini milik anda sendiri.)
-5. Lihat **Execution log** di bawah. Mesti ada: `Setup selesai. 123 tiang diimport; 7 slot dicipta; Admin: emel-anda@gmail.com`.
+5. Lihat **Execution log** di bawah. Mesti ada: `Setup selesai. 123 tiang diimport; Admin: emel-anda@gmail.com`.
 6. Kembali ke Google Sheet. Semak:
-   - Tab **Poles**: 123 baris (SL-001 … SL-123)
-   - Tab **Slots**: 7 baris
+   - Tab **Poles**: 123 baris (SSL001 … SSL123)
+   - Tab **Activities**: 3 baris (Pegging, Trial Pit, Installation)
+   - Tab **PhotoTypes**: 8 baris (A1, B1–B4, C1–C3)
+   - Tab **WorkPlan**: kosong (pelan kerja)
    - Tab **Users**: emel anda sebagai **Admin**. Tukar lajur `Name` kepada nama anda.
-   - Tab **Settings**: ada `PhotosFolderID`, `ReportsFolderID`, `TemplateDocID` (sudah terisi)
-7. Dalam Google Drive anda kini ada folder **Solar Photos**, **Solar Reports** dan dokumen **Solar Report Template**.
+   - Tab **Settings**: ada `PhotosFolderID` dan `ReportsFolderID` (sudah terisi)
+7. Dalam Google Drive anda kini ada folder **Solar Photos** dan **Solar Reports**.
 
 > Jika `setup` dijalankan sekali lagi, ia **tidak** menggandakan data (selamat).
 
@@ -92,10 +98,10 @@ Dalam tab **Settings**, isi lajur `Value`:
 |---|---|
 | ClientID | CLIENT_ID dari Langkah 5 |
 | AppURL | `https://globalsentrum.github.io/solar-light-app/` (mesti ada `/` di hujung) |
-| ReportMaxPoles | `10` (sudah ada; maksimum tiang bagi satu PDF) |
+| ReportMaxPhotos | `60` (sudah ada; maksimum gambar bagi satu laporan → Pegging 60 tiang, Trial Pit 15, Installation 10) |
 | SessionDays | `30` (sudah ada; tempoh log masuk kekal) |
 
-Jangan ubah `PhotosFolderID`, `ReportsFolderID`, `TemplateDocID`.
+Jangan ubah `PhotosFolderID` dan `ReportsFolderID`.
 
 ## Langkah 7 — GitHub: isi config & hidupkan GitHub Pages
 
@@ -123,7 +129,7 @@ Jangan ubah `PhotosFolderID`, `ReportsFolderID`, `TemplateDocID`.
 
 1. Buka alamat aplikasi di komputer (Chrome).
 2. Klik **Sign in with Google** → pilih akaun admin → skrin "Log masuk berjaya" → klik **Teruskan ke aplikasi**.
-3. Dashboard mesti menunjukkan: Kerja siap **33/123**, Perlu pasang **44**, Tunggu kelulusan **46**.
+3. Dashboard mesti menunjukkan: Kerja siap **33/123**, Perlu pasang **44**, Tunggu kelulusan **46**, Gambar lengkap **0/44**.
 
 Jika ralat:
 - *"Client ID tidak sepadan"* → ClientID dalam tab Settings tidak sama dengan config.js.
@@ -165,8 +171,8 @@ Atau terus dalam tab **Users** dalam Sheet (Email, Name, Role = `Admin` / `Team`
 **Kemas kini aplikasi telefon (docs/):** selepas commit di GitHub, telefon akan dapat versi baru secara automatik
 (mesej "Versi baru aplikasi dipasang" → tutup & buka semula aplikasi).
 
-**Logo / format laporan PDF:** edit dokumen **Solar Report Template** dalam Drive. Kekalkan teks
-`{{PROJECT}}`, `{{REPORTID}}`, `{{GENERATED}}`, `{{USER}}` dan `{{CONTENT}}` (bahagian tiang dimasukkan di tempat `{{CONTENT}}`).
+**Laporan:** dibina terus oleh aplikasi (tiada templat). Hanya halaman gambar; borang RIN (OP 11, tandatangan)
+digabungkan sendiri. Setiap laporan disimpan dalam `Solar Reports/` sebagai **PDF dan Word (.docx)**.
 
 **Log keluar semua orang serta-merta (kecemasan):** Apps Script → ⚙️ Project Settings → Script Properties →
 padam `SESSION_SECRET` → jalankan `setup` sekali lagi. Semua orang perlu log masuk semula.
@@ -178,3 +184,64 @@ Lajur status kerja/gambar tidak disimpan dalam Sheet; ia dikira automatik.
 
 - Apps Script: 6 minit setiap permintaan (sebab itulah PDF dihadkan 10 tiang), ~20,000 panggilan URL sehari.
 - Google Drive: 15 GB percuma (≈ 30,000 gambar pada ~400 KB).
+
+---
+
+# Kemas kini ke versi 2 (Sheet sedia ada)
+
+Versi 2: 3 aktiviti (Pegging / Trial Pit / Installation) dengan 8 jenis gambar, ukuran (meter), pilihan gambar
+laporan, laporan ikut aktiviti (PDF + Word), Pelan kerja (Hari ini / Esok) dan ID tiang baru **SSL001**.
+
+Buat semua langkah dalam **satu sesi**, apabila tiada orang menggunakan aplikasi (cth. waktu malam).
+
+### V1. Sebelum mula
+1. Minta semua pasukan buka aplikasi dengan line internet dan pastikan bar atas menunjukkan **✅ Semua disimpan**.
+   (Jika ada telefon yang masih ada item menunggu, ia akan tetap dihantar selepas kemas kini — ID lama
+   ditukar automatik — tetapi lebih selamat jika semua sudah dihantar.)
+2. Buat salinan sandaran Sheet: **File → Make a copy** (Fail → Buat salinan).
+
+### V2. Tampal kod baru dalam Apps Script
+Buka Sheet → **Extensions → Apps Script**. Ganti **seluruh** isi dua fail ini dengan versi baru dari GitHub:
+
+| Fail dalam Apps Script | Salin dari GitHub |
+|---|---|
+| `Code.gs` | `apps-script/Code.gs` |
+| `Logic.gs` | `apps-script/Logic.gs` |
+
+`SeedData.gs` **tidak perlu** ditukar untuk Sheet sedia ada (fail baru hanya untuk Sheet baru).
+Tekan **💾 Save**.
+
+### V3. Jalankan `migrateV2` (sekali)
+1. Pilih fungsi **`migrateV2`** → **▶ Run**. Jika diminta kebenaran, ikut seperti Langkah 3 (Advanced → Allow).
+2. Execution log mesti berakhir dengan `migrateV2 selesai: … perubahan.` dan senarai perubahan.
+3. Semak dalam Sheet:
+   - Tab **Poles**: ID kini `SSL001 … SSL123`
+   - Tab **Photos**: lajur `PhotoTypeID`, `ReportOrder`, `MeasurementM`
+   - Tab baru **Activities**, **PhotoTypes**, **WorkPlan**; tab lama **Slots** kini bernama **Slots_old** (simpanan sahaja)
+   - Tab **AuditLog**: satu baris baru `MigrationV2` (sejarah lama tidak diubah)
+4. Dalam Drive `Solar Photos/`: folder kini `SSL034` dsb.
+
+Apa yang berlaku kepada gambar ujian lama: slot 1 → Pegging, 2 → Korek, 3 "Ukuran" → Lebar (**tanpa ukuran**, jadi
+tidak dikira lengkap), 4 & 5 → Progress pemasangan, 6 → Siap dipasang (siang), 7 → Ujian lampu (malam).
+Pilihan laporan lama dikosongkan. Gambar ujian boleh disembunyikan oleh admin.
+
+Selamat dijalankan dua kali: kali kedua log menunjukkan `tiada perubahan (sudah dimigrasi)`.
+Jika log menunjukkan `ID tiang tidak dikenali`, **tiada apa-apa ditukar** — betulkan ID itu dalam tab Poles dan jalankan semula.
+
+### V4. Terbitkan versi baru Web App (URL kekal sama)
+1. **Deploy → Manage deployments**.
+2. Pilih deployment sedia ada → ikon ✏️ **Edit**.
+3. **Version: New version** → Description `v2` → **Deploy**.
+4. URL `/exec` **tidak berubah** — tidak perlu ubah `config.js` atau Google Cloud.
+⚠️ Jangan guna "New deployment" (itu menghasilkan URL baru).
+
+### V5. Aplikasi telefon
+Aplikasi telefon (GitHub Pages) dikemas kini apabila kod v2 digabungkan ke cabang `main` di GitHub.
+Selepas itu, setiap telefon: buka aplikasi dengan line → mesej "Versi baru aplikasi dipasang" → tutup & buka semula.
+
+### V6. Semak
+- Jadual kerja (admin) dibuka pada tab **Semua**; ID tiang `SSL…`
+- Buka satu tiang → 3 kumpulan: Pegging / Trial Pit / Installation
+- Admin → **Aktiviti & jenis gambar** → semak nama dan spesifikasi Trial Pit
+- Cuba **Rancang kerja** untuk esok, kemudian log masuk sebagai pasukan → tab **Esok**
+- Jana satu laporan bagi setiap aktiviti dan semak PDF + Word dalam `Solar Reports/`

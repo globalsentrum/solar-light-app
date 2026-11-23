@@ -19,8 +19,10 @@ docs/                 Aplikasi telefon (GitHub Pages: branch main, folder /docs)
   sw.js               Service worker (luar talian)
 apps-script/          Backend — tampal ke Apps Script
   Code.gs, Logic.gs   (+ SeedData.gs peribadi, TIDAK dalam repo)
+  migrateV2()         sekali sahaja untuk Sheet versi 1 (lihat Panduan Setup, "Kemas kini ke versi 2")
 shared/logic.js       Logik status & kebenaran (satu sumber untuk frontend + backend)
-scripts/import-xlsx.js  xlsx → apps-script/SeedData.gs
+scripts/import-xlsx.js  xlsx → apps-script/SeedData.gs (ID SL-034 → SSL034)
+scripts/preview-report.js  pratonton laporan (PDF + Word) dari susun atur yang sama dengan Apps Script
 tests/                Ujian unit, backend (mock Google) & pelayar (Playwright)
 guides/               Panduan BM
 ```
@@ -35,9 +37,10 @@ Gambar, nota dan Sheet hanya boleh dicapai selepas log masuk Google dengan emel 
 
 ```bash
 npm install
-# letak xlsx dalam data/Solar_Street_Lighting_Installation_Planning_1.xlsx
-npm run import      # jana apps-script/SeedData.gs
-npm run test:all    # 38 ujian
+# (Sheet baru sahaja) letak xlsx dalam data/Solar_Street_Lighting_Installation_Planning_1.xlsx
+npm run import      # jana apps-script/SeedData.gs (peribadi)
+npm run test:all    # 47 ujian (guna data dummy; tidak perlu xlsx)
+npm run preview     # test-output/report-preview/PREVIEW_*.docx + .pdf
 ```
 
 Selepas mengubah `shared/logic.js` atau fail dalam `docs/`, jalankan `npm run build`

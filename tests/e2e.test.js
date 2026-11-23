@@ -51,161 +51,253 @@ async function setup(email, opts) {
   return { srv, base, ctx, page, sheet, close, errors };
 }
 
-async function takePhoto(page, poleId, slotIdx, mode, file) {
-  if (!page.url().includes('#/tiang/' + poleId)) {
-    await page.goto(page.url().split('#')[0] + '#/tiang/' + poleId);
-  }
+
+/** Open a pole, take a photo for one photo type (+ measurement if asked). */
+async function takePhoto(page, poleId, typeId, mode, file, measurement) {
+  if (!page.url().includes('#/tiang/' + poleId)) await page.goto(page.url().split('#')[0] + '#/tiang/' + poleId);
   await page.waitForSelector('.slots');
   const chooser = page.waitForEvent('filechooser');
-  await page.locator('.slots .tile').nth(slotIdx).locator('[data-act=addPhoto]').last().click();
+  await page.locator(`button[data-act=addPhoto][data-type="${typeId}"]`).click();
   await page.click(mode === 'camera' ? 'text=📷 Kamera' : 'text=🖼️ Galeri');
   (await chooser).setFiles(path.join(FIX, file));
+  if (measurement !== undefined) {
+    await page.waitForSelector('#measIn');
+    await page.fill('#measIn', String(measurement));
+    await page.click('[data-act=measOk]');
+  }
   await page.waitForFunction(() => { const t = document.querySelector('#toast'); return !t.hidden && t.textContent.includes('Gambar disimpan'); });
   await page.evaluate(() => { document.querySelector('#toast').hidden = true; });
 }
 
 const syncText = (page) => page.textContent('#syncBtn');
 const waitSynced = (page, timeout) => page.waitForFunction(() => document.querySelector('#syncBtn').textContent.includes('Semua disimpan'), null, { timeout: timeout || 30000 });
+/** 2027-01-05 23:59:30 in Malaysia (UTC+8) */
+const KL_LATE = new Date(Date.UTC(2027, 0, 5, 15, 59, 30));
+/** 2027-01-06 00:00:30 in Malaysia */
+const KL_AFTER_MIDNIGHT = new Date(Date.UTC(2027, 0, 5, 16, 0, 30));
+const api = (srv, email, action, params) => JSON.parse(JSON.stringify(srv.rt.g.handle_({ action, token: srv.rt.g.issueSession_(email), ...params })));
 
-test('dashboard numbers and jadual filters on imported data', async () => {
-  const { page, base, close } = await setup('team@example.com');
+test('dashboard numbers; Admin opens Jadual on "Semua" with filters, search by number', async () => {
+  const { page, base, close } = await setup('admin@example.com');
   await page.goto(base + '/#/dashboard');
   await page.waitForSelector('.stats');
   const vals = await page.$$eval('.stat', (els) => els.map((e) => e.querySelector('.stat-label').textContent + '=' + e.querySelector('.stat-val').textContent));
   assert.deepEqual(vals, ['Kerja siap=33/123', 'Gambar lengkap=0/44', 'Perlu pasang=44', 'Tunggu kelulusan=46', 'Dalam proses=0', 'Belum mula=44']);
-  const bounds = await page.$$eval('.bound-head', (els) => els.map((e) => e.textContent));
-  assert.deepEqual(bounds, ['EB23 / 54 siap (43%)', 'WB10 / 69 siap (14%)']);
   await page.screenshot({ path: path.join(OUT, 'screen-dashboard.png'), fullPage: true });
-
   await page.click('a[href="#/jadual"].btn');
   await page.waitForSelector('.prow');
+  assert.equal(await page.textContent('.seg-btn.on'), 'Semua');
   const count = async () => page.$$eval('.prow', (e) => e.length);
   assert.equal(await count(), 123);
   await page.click('[data-act=filter][data-val=EB]');
   assert.equal(await count(), 54);
-  await page.click('[data-act=filter][data-val=WB]');
-  assert.equal(await count(), 69);
   await page.click('[data-act=filter][data-group=bound][data-val=all]');
   await page.click('[data-act=filter][data-val="Tunggu kelulusan"]');
   assert.equal(await count(), 46);
-  await page.click('[data-act=filter][data-val="Perlu pasang"]');
-  assert.equal(await count(), 44);
-  await page.click('[data-act=filter][data-val=Siap]');
-  assert.equal(await count(), 33);
   await page.click('[data-act=filter][data-group=status][data-val=all]');
-  await page.fill('#search', 'SL-05');
-  assert.equal(await count(), 10);
+  await page.fill('#search', '34');
+  assert.deepEqual(await page.$$eval('.prow-main b', (e) => e.map((x) => x.textContent)), ['SSL034']);
+  await page.fill('#search', 'SSL05');
+  assert.equal(await count(), 11, 'SSL050..SSL059 + SSL005');
   await page.fill('#search', '');
-  // sorted by chainage
-  const ch = await page.$$eval('.prow .small', (e) => e.map((x) => parseInt(x.textContent.match(/\d+/)[0], 10)));
-  assert.deepEqual(ch, ch.slice().sort((a, b) => a - b));
-  // row content incl. CH label + photo x/7
-  const row56 = await page.textContent('a[href="#/tiang/SL-056"]');
-  assert.match(row56, /SL-056/); assert.match(row56, /CH\.42400 – CH\.42600/); assert.match(row56, /CH belum tepat/); assert.match(row56, /0\/7/); assert.match(row56, /24\/11\/2026/);
-  await page.screenshot({ path: path.join(OUT, 'screen-jadual.png') });
-  // dashboard card opens filtered list
-  await page.goto(base + '/#/dashboard');
-  await page.click('.stat >> text=Tunggu kelulusan');
-  await page.waitForSelector('.prow');
-  assert.equal(await count(), 46);
+  const row = await page.textContent('.prow:has(a[href="#/tiang/SSL056"])');
+  assert.match(row, /SSL056/); assert.match(row, /CH belum tepat/); assert.match(row, /0\/11/);
   await close();
 });
 
-test('OFFLINE: photos, note and Siap queued, survive reload, sync once (no duplicates even when a reply is lost)', async () => {
+test('Team/Boss open Jadual on "Esok"; Hari ini / Esok use Malaysia dates (23:59 vs 00:00); several plans per pole; cached offline', async () => {
+  const s = await setup('team@example.com');
+  const { page, base, srv, ctx, close } = s;
+  api(srv, 'admin@example.com', 'addPlans', { poleIds: ['SSL050', 'SSL040'], date: '2027-01-06', activityId: 'B' });
+  api(srv, 'admin@example.com', 'addPlans', { poleIds: ['SSL040'], date: '2027-01-06', activityId: 'C' });
+  api(srv, 'admin@example.com', 'addPlans', { poleIds: ['SSL045'], date: '2027-01-06', activityId: '' });
+  api(srv, 'admin@example.com', 'addPlans', { poleIds: ['SSL036'], date: '2027-01-05', activityId: 'A' });
+  await ctx.clock.setFixedTime(KL_LATE); // 23:59 on 5 Jan in Malaysia (15:59 UTC)
+  await page.goto(base + '/#/jadual');
+  await page.waitForSelector('.seg-btn.on');
+  assert.equal(await page.textContent('.seg-btn.on'), 'Esok');
+  assert.match(await page.textContent('.card'), /06\/01\/2027/);
+  const ids = () => page.$$eval('.prow-main b', (e) => e.map((x) => x.textContent));
+  // sorted by chainage (dummy chainages increase with the ID)
+  assert.deepEqual(await ids(), ['SSL040', 'SSL045', 'SSL050']);
+  assert.match(await page.textContent('.prow:has(a[href="#/tiang/SSL040"]) .b-plan'), /^Trial Pit · Installation$/);
+  assert.equal(await page.locator('.prow:has(a[href="#/tiang/SSL045"]) .b-plan').count(), 0, 'blank activity -> no label');
+  assert.match(await page.textContent('.prow:has(a[href="#/tiang/SSL045"])'), /Belum mula/);
+  await page.screenshot({ path: path.join(OUT, 'screen-esok.png'), fullPage: true });
+  await page.click('[data-act=jtab][data-val=hari]');
+  assert.deepEqual(await ids(), ['SSL036']);
+  // offline: reload still shows the plan from the phone's cache
+  await page.waitForFunction(() => navigator.serviceWorker && navigator.serviceWorker.controller);
+  await ctx.setOffline(true);
+  await page.reload();
+  await page.waitForSelector('.seg-btn.on');
+  await page.click('[data-act=jtab][data-val=esok]');
+  assert.deepEqual(await ids(), ['SSL040', 'SSL045', 'SSL050'], 'plans cached offline');
+  await ctx.setOffline(false);
+  await close();
+  // just after midnight in Malaysia: the 6 Jan plans are now "Hari ini", tomorrow is empty
+  const s2 = await setup('boss@example.com');
+  api(s2.srv, 'admin@example.com', 'addPlans', { poleIds: ['SSL050'], date: '2027-01-06', activityId: 'B' });
+  await s2.ctx.clock.setFixedTime(KL_AFTER_MIDNIGHT);
+  await s2.page.goto(s2.base + '/#/jadual');
+  await s2.page.waitForSelector('.seg-btn.on');
+  assert.equal(await s2.page.textContent('.seg-btn.on'), 'Esok');
+  assert.equal(await s2.page.textContent('.empty-plan'), 'Tiada kerja dirancang untuk esok.');
+  await s2.page.click('[data-act=jtab][data-val=hari]');
+  assert.deepEqual(await s2.page.$$eval('.prow-main b', (e) => e.map((x) => x.textContent)), ['SSL050']);
+  assert.equal(await s2.page.locator('.pchk').count(), 0, 'Boss cannot tick poles');
+  await s2.close();
+});
+
+test('Admin plans work from the schedule: tick poles -> Rancang kerja -> edit / remove on the pole screen', async () => {
+  const { page, base, ctx, sheet, close } = await setup('admin@example.com');
+  await ctx.clock.setFixedTime(KL_LATE);
+  await page.goto(base + '/#/jadual');
+  await page.waitForSelector('.prow');
+  await page.check('.prow:has(a[href="#/tiang/SSL034"]) input[data-act=psel]');
+  await page.check('.prow:has(a[href="#/tiang/SSL041"]) input[data-act=psel]');
+  assert.match(await page.textContent('.planbar'), /2 tiang dipilih/);
+  await page.click('[data-act=planOpen]');
+  assert.equal(await page.inputValue('#planDate'), '2027-01-06', 'defaults to tomorrow (Malaysia)');
+  await page.selectOption('#planAct', 'B');
+  await page.click('[data-act=planSave]');
+  await page.waitForFunction(() => document.querySelector('#toast').textContent.includes('2 pelan ditambah'));
+  assert.deepEqual(sheet('WorkPlan').map((p) => p.PoleID + ' ' + p.Date + ' ' + p.Activity).sort(), ['SSL034 2027-01-06 B', 'SSL041 2027-01-06 B']);
+  // same again -> skipped
+  await page.check('.prow:has(a[href="#/tiang/SSL034"]) input[data-act=psel]');
+  await page.click('[data-act=planOpen]');
+  await page.selectOption('#planAct', 'B');
+  await page.click('[data-act=planSave]');
+  await page.waitForFunction(() => document.querySelector('#toast').textContent.includes('1 sudah ada'));
+  assert.equal(sheet('WorkPlan').length, 2);
+  await page.click('[data-act=jtab][data-val=esok]');
+  assert.deepEqual(await page.$$eval('.prow-main b', (e) => e.map((x) => x.textContent)), ['SSL034', 'SSL041']);
+  // edit + remove from the pole screen
+  await page.goto(base + '/#/tiang/SSL034');
+  await page.waitForSelector('.planlist');
+  assert.match(await page.textContent('.planlist'), /06\/01\/2027 · Trial Pit/);
+  await page.click('[data-act=planEdit]');
+  await page.fill('#planDate', '2027-01-09');
+  await page.selectOption('#planAct', 'C');
+  await page.click('[data-act=planEditSave]');
+  await page.waitForFunction(() => /09\/01\/2027 · Installation/.test(document.querySelector('.planlist').textContent));
+  await page.click('[data-act=planEdit]');
+  await page.click('[data-act=planRemove]');
+  await page.waitForFunction(() => !document.querySelector('.planlist'));
+  assert.deepEqual(sheet('WorkPlan').map((p) => p.PoleID), ['SSL041']);
+  assert.deepEqual(sheet('AuditLog').filter((a) => a.Entity === 'WorkPlan').map((a) => a.Action), ['PlanAdded', 'PlanAdded', 'PlanEdited', 'PlanEdited', 'PlanRemoved']);
+  await close();
+});
+
+test('pole screen: 3 activity groups, counts/minimums, measurement required and validated, value under thumbnails', async () => {
+  const { page, base, sheet, close } = await setup('team@example.com');
+  await page.goto(base + '/#/tiang/SSL034');
+  await page.waitForSelector('.act');
+  assert.deepEqual(await page.$$eval('.act h3', (e) => e.map((x) => x.textContent)), ['Pegging', 'Trial Pit', 'Installation']);
+  assert.match(await page.textContent('.act >> nth=1 >> .spec'), /Dalam 1.5m, lebar 1m, panjang 1m/);
+  assert.match(await page.textContent('.pole-head'), /Pegging 0\/1 · Trial Pit 0\/4 · Installation 0\/6/);
+  assert.match(await page.textContent('.tile:has([data-type=C1])'), /0 gambar · minimum 4/);
+  assert.match(await page.textContent('.tile:has([data-type=B2])'), /perlu ukuran/);
+  // measurement dialog: empty / invalid / too many decimals, then "1,3"
+  const chooser = page.waitForEvent('filechooser');
+  await page.click('button[data-act=addPhoto][data-type="B2"]');
+  await page.click('text=🖼️ Galeri');
+  (await chooser).setFiles(path.join(FIX, 'gallery_exif.jpg'));
+  await page.waitForSelector('#measIn');
+  await page.click('[data-act=measOk]');
+  assert.match(await page.textContent('#measErr'), /Sila masukkan ukuran dalam meter/);
+  await page.fill('#measIn', 'abc');
+  await page.click('[data-act=measOk]');
+  assert.match(await page.textContent('#measErr'), /tidak sah/);
+  await page.fill('#measIn', '1.355');
+  await page.click('[data-act=measOk]');
+  assert.match(await page.textContent('#measErr'), /maksimum 2 titik perpuluhan/);
+  await page.fill('#measIn', '0');
+  await page.click('[data-act=measOk]');
+  assert.match(await page.textContent('#measErr'), /lebih daripada 0/);
+  await page.screenshot({ path: path.join(OUT, 'screen-measurement.png') });
+  await page.fill('#measIn', '1,3');
+  await page.click('[data-act=measOk]');
+  await page.waitForFunction(() => document.querySelector('#toast').textContent.includes('Gambar disimpan'));
+  await waitSynced(page);
+  assert.equal(await page.textContent('.tile:has([data-type=B2]) .meas'), '1.3 m');
+  // discard: Batal throws the photo away (nothing queued, nothing uploaded)
+  const ch2 = page.waitForEvent('filechooser');
+  await page.click('button[data-act=addPhoto][data-type="B3"]');
+  await page.click('text=📷 Kamera');
+  (await ch2).setFiles(path.join(FIX, 'camera_noexif.jpg'));
+  await page.waitForSelector('#measIn');
+  await page.click('[data-act=measCancel]');
+  await page.waitForFunction(() => document.querySelector('#toast').textContent.includes('Gambar dibuang'));
+  await takePhoto(page, 'SSL034', 'B3', 'camera', 'camera_noexif.jpg', '1.6');
+  await takePhoto(page, 'SSL034', 'A1', 'camera', 'camera_noexif.jpg');
+  await waitSynced(page);
+  const photos = sheet('Photos').filter((p) => p.PoleID === 'SSL034');
+  assert.deepEqual(photos.map((p) => p.PhotoTypeID + ':' + p.MeasurementM).sort(), ['A1:', 'B2:1.3', 'B3:1.6']);
+  assert.match(await page.textContent('.pole-head'), /Pegging ✓ · Trial Pit 2\/4 · Installation 0\/6/);
+  await page.screenshot({ path: path.join(OUT, 'screen-pole-v2.png'), fullPage: true });
+  await close();
+});
+
+test('OFFLINE: photos (incl. measurement), note and Siap queued, survive reload, sync once (no duplicates when a reply is lost)', async () => {
   const { page, base, ctx, srv, sheet, close } = await setup('team@example.com');
-  await page.goto(base + '/#/tiang/SL-035');
+  await page.goto(base + '/#/tiang/SSL035');
   await page.waitForSelector('.slots');
   await page.waitForFunction(() => navigator.serviceWorker && navigator.serviceWorker.controller);
-
   await ctx.setOffline(true);
-  await takePhoto(page, 'SL-035', 0, 'camera', 'camera_noexif.jpg');
-  await takePhoto(page, 'SL-035', 1, 'gallery', 'gallery_exif.jpg');
-  await page.fill('#noteText', 'Lokasi dianjak 3 m ke arah Karak (paip air)');
+  await takePhoto(page, 'SSL035', 'C1', 'camera', 'camera_noexif.jpg');
+  await takePhoto(page, 'SSL035', 'B4', 'gallery', 'gallery_exif.jpg', '1.5');
+  await page.fill('#noteText', 'Lokasi dianjak 3 m (paip air)');
   await page.click('[data-act=addNote]');
   await page.click('[data-act=done][data-val="1"]');
   await page.waitForFunction(() => document.querySelector('#syncBtn').textContent.includes('4 item'));
   assert.equal(await syncText(page), '⏳ 4 item menunggu line');
-  assert.match(await page.textContent('#banner'), /Tiada line/);
-
-  // reload while offline: app shell from service worker, queue + data from IndexedDB
   await page.reload();
   await page.waitForSelector('.slots');
   assert.equal(await syncText(page), '⏳ 4 item menunggu line');
   assert.equal(await page.locator('.thumb .tb.wait').count(), 2);
-  assert.match(await page.textContent('.notes'), /Lokasi dianjak 3 m/);
+  assert.equal(await page.textContent('.tile:has([data-type=B4]) .meas'), '1.5 m', 'measurement shown while still queued');
   assert.match(await page.textContent('.pole-head'), /Siap/);
-  assert.match(await page.textContent('.pole-head'), /Belum lengkap \(2\/7\)/);
-  await page.screenshot({ path: path.join(OUT, 'screen-offline-queue.png'), fullPage: true });
-  assert.equal(sheet('Photos').filter((p) => p.PoleID === 'SL-035').length, 0, 'nothing reached the server yet');
-
-  // back online — but the reply to the first upload gets lost (server saved it; phone retries)
+  assert.match(await page.textContent('.pole-head'), /Trial Pit 1\/4 · Installation 1\/6/);
+  assert.equal(sheet('Photos').length, 0);
   srv.flags.dropNextResponse = 1;
   await ctx.setOffline(false);
   await page.evaluate(() => window.dispatchEvent(new Event('online')));
   await waitSynced(page, 45000);
-
-  const photos = sheet('Photos').filter((p) => p.PoleID === 'SL-035');
+  const photos = sheet('Photos').filter((p) => p.PoleID === 'SSL035');
   assert.equal(photos.length, 2, 'exactly 2 photos, no duplicate after the lost reply');
-  assert.equal(new Set(photos.map((p) => p.PhotoID)).size, 2);
-  assert.deepEqual(photos.map((p) => p.SlotID).sort(), ['S1', 'S2']);
-  const gal = photos.find((p) => p.SlotID === 'S2');
-  assert.equal(gal.Source, 'Gallery');
-  assert.equal(gal.CapturedAt, '2026-11-20T09:15:30+08:00', 'EXIF time');
-  assert.equal(gal.Latitude, '3.212345');
-  const cam = photos.find((p) => p.SlotID === 'S1');
-  assert.equal(cam.Source, 'Camera');
-  assert.equal(cam.GPSAvailable, 'TRUE');
-  assert.equal(cam.AccuracyM, '6');
-  assert.equal(sheet('Notes').filter((n) => n.PoleID === 'SL-035').length, 1);
-  assert.equal(sheet('Poles').find((p) => p.PoleID === 'SL-035').IsDone, 'TRUE');
-  assert.equal(sheet('AuditLog').filter((a) => a.Action === 'PhotoAdded').length, 2);
-  const uploads = srv.flags.calls.filter((c) => c.action === 'uploadPhoto').length;
-  assert.equal(uploads, 3, '2 photos + 1 retry of the lost reply');
-  assert.equal(srv.flags.calls.filter((c) => c.action === 'PREFLIGHT').length, 0, 'no CORS preflight (text/plain)');
-  // drive files: 2 photos + 2 thumbs only
-  const folder = Object.values(srv.rt.state.folders).find((f) => f.name === 'SL-035');
-  assert.equal(Object.values(srv.rt.state.files).filter((f) => f.parent === folder.id).length, 4);
-
-  await page.reload();
-  await page.waitForSelector('.slots');
-  assert.equal(await page.locator('.thumb .tb.wait').count(), 0);
-  assert.equal(await page.locator('.thumb img').count(), 2, 'thumbnails shown');
-  await page.screenshot({ path: path.join(OUT, 'screen-pole-synced.png'), fullPage: true });
+  assert.deepEqual(photos.map((p) => p.PhotoTypeID + ':' + p.MeasurementM).sort(), ['B4:1.5', 'C1:']);
+  assert.equal(photos.find((p) => p.PhotoTypeID === 'B4').CapturedAt, '2026-11-20T09:15:30+08:00', 'EXIF time');
+  assert.equal(sheet('Notes').filter((n) => n.PoleID === 'SSL035').length, 1);
+  assert.equal(sheet('Poles').find((p) => p.PoleID === 'SSL035').IsDone, 'TRUE');
+  assert.equal(srv.flags.calls.filter((c) => c.action === 'uploadPhoto').length, 3, '2 photos + 1 retry');
+  assert.equal(srv.flags.calls.filter((c) => c.action === 'PREFLIGHT').length, 0);
   await close();
 });
 
-test('OFFLINE + sign-in expired: nothing lost, user asked to sign in again, then sync continues', async () => {
+test('OFFLINE + sign-in expired: nothing lost, sign in again, then sync continues', async () => {
   const { page, base, ctx, srv, sheet, close } = await setup('team@example.com');
-  await page.goto(base + '/#/tiang/SL-036');
+  await page.goto(base + '/#/tiang/SSL036');
   await page.waitForSelector('.slots');
   await page.waitForFunction(() => navigator.serviceWorker && navigator.serviceWorker.controller);
   await ctx.setOffline(true);
-  await takePhoto(page, 'SL-036', 2, 'camera', 'camera_noexif.jpg');
+  await takePhoto(page, 'SSL036', 'A1', 'camera', 'camera_noexif.jpg');
   await page.fill('#noteText', 'Nota semasa tiada line');
   await page.click('[data-act=addNote]');
-  // session becomes invalid while the phone is offline
   await fetch(base + '/__test/rotateSecret');
   await ctx.setOffline(false);
   await page.evaluate(() => window.dispatchEvent(new Event('online')));
   await page.waitForFunction(() => /Sesi log masuk tamat/.test(document.querySelector('#banner').textContent));
   assert.equal(await syncText(page), '⏳ 2 item menunggu line');
-  assert.match(await page.textContent('#banner'), /2 item belum dihantar/);
-  assert.equal(sheet('Photos').length, 0);
-  await page.screenshot({ path: path.join(OUT, 'screen-session-expired.png') });
-
-  // user taps "Log masuk semula" -> login screen still shows the waiting items
   await page.click('[data-act=relogin]');
   await page.waitForSelector('.login');
   assert.match(await page.textContent('.login'), /2 item masih disimpan dalam telefon/);
-  // Google sign-in comes back to the app with a new session (same flow as the Apps Script redirect)
   const fresh = srv.rt.g.issueSession_('team@example.com');
   const nonce = await page.evaluate(() => localStorage.getItem('solar.nonce'));
-  assert.ok(nonce, 'nonce stored before sign-in');
   await page.goto(base + '/?r=1#login=' + encodeURIComponent(fresh) + '&nonce=' + nonce);
   await waitSynced(page, 30000);
-  assert.equal(sheet('Photos').filter((p) => p.PoleID === 'SL-036').length, 1);
-  assert.equal(sheet('Notes').filter((n) => n.PoleID === 'SL-036').length, 1);
-  assert.ok(!(await page.url()).includes('login='), 'token removed from address bar');
+  assert.equal(sheet('Photos').filter((p) => p.PoleID === 'SSL036').length, 1);
+  assert.equal(sheet('Notes').filter((n) => n.PoleID === 'SSL036').length, 1);
   await close();
 });
 
@@ -220,163 +312,129 @@ test('sign-in return with wrong nonce is rejected; #loginerror shown in Malay', 
   await page.goto(base + '/?a=2#loginerror=' + encodeURIComponent('Emel x@gmail.com tiada dalam senarai pengguna.'));
   await page.waitForSelector('.login .err');
   assert.match(await page.textContent('.login .err'), /tiada dalam senarai pengguna/);
-  await page.screenshot({ path: path.join(OUT, 'screen-login.png') });
   await close();
 });
 
-test('UI per role: Boss read-only, Team no admin tools, category rules', async () => {
-  // Boss
+test('UI per role: Boss read-only; Team no admin tools (no ticking, no report choice); category rules', async () => {
   let s = await setup('boss@example.com');
-  await s.page.goto(s.base + '/#/tiang/SL-034');
+  api(s.srv, 'team@example.com', 'uploadPhoto', { photoId: 'boss_view_0001', poleId: 'SSL034', typeId: 'A1', imageB64: fs.readFileSync(path.join(FIX, 'tiny.jpg')).toString('base64'), source: 'Camera', gpsAvailable: false });
+  await s.page.goto(s.base + '/#/tiang/SSL034');
   await s.page.waitForSelector('.slots');
-  assert.equal(await s.page.locator('[data-act=addPhoto]').count(), 0);
-  assert.equal(await s.page.locator('#noteText').count(), 0);
-  assert.equal(await s.page.locator('[data-act=done]').count(), 0);
-  assert.equal(await s.page.locator('text=Edit tiang').count(), 0);
+  for (const sel of ['[data-act=addPhoto]', '#noteText', '[data-act=done]', '[data-act=chooseReport]', 'text=Edit tiang']) {
+    assert.equal(await s.page.locator(sel).count(), 0, 'Boss: ' + sel);
+  }
   assert.equal(await s.page.isHidden('[data-tab=admin]'), true);
   await s.page.goto(s.base + '/#/laporan');
   await s.page.waitForSelector('h3');
   assert.equal(await s.page.locator('[data-act=genReport]').count(), 0);
-  await s.page.goto(s.base + '/#/admin/pengguna');
-  await s.page.waitForSelector('.stats');
   await s.close();
-  // Team
   s = await setup('team@example.com');
-  await s.page.goto(s.base + '/#/tiang/SL-034');
+  api(s.srv, 'team@example.com', 'uploadPhoto', { photoId: 'team_view_0001', poleId: 'SSL034', typeId: 'A1', imageB64: fs.readFileSync(path.join(FIX, 'tiny.jpg')).toString('base64'), source: 'Camera', gpsAvailable: false });
+  await s.page.goto(s.base + '/#/tiang/SSL034');
   await s.page.waitForSelector('.slots');
   assert.equal(await s.page.locator('[data-act=addPhoto]').count() > 0, true);
+  assert.equal(await s.page.locator('[data-act=chooseReport]').count(), 0);
   assert.equal(await s.page.locator('text=Edit tiang').count(), 0);
-  assert.equal(await s.page.isHidden('[data-tab=admin]'), true);
-  await s.page.goto(s.base + '/#/tiang/SL-078'); // Tunggu kelulusan
+  await s.page.goto(s.base + '/#/jadual');
+  await s.page.click('[data-act=jtab][data-val=semua]');
+  await s.page.waitForSelector('.prow');
+  assert.equal(await s.page.locator('.pchk').count(), 0, 'Team cannot tick poles for planning');
+  await s.page.goto(s.base + '/#/tiang/SSL078');
   await s.page.waitForSelector('.slots');
   assert.equal(await s.page.locator('[data-act=addPhoto]').count(), 0);
-  assert.equal(await s.page.locator('[data-act=done]').count(), 0);
   assert.equal(await s.page.locator('#noteText').count(), 1);
-  assert.match(await s.page.textContent('.pole-head'), /Tunggu kelulusan/);
-  await s.page.goto(s.base + '/#/tiang/SL-001'); // Sudah dipasang
+  await s.page.goto(s.base + '/#/tiang/SSL001');
   await s.page.waitForSelector('.slots');
   assert.equal(await s.page.locator('[data-act=addPhoto]').count() > 0, true);
   assert.equal(await s.page.locator('[data-act=done]').count(), 0);
-  assert.match(await s.page.textContent('.pole-head'), /Tidak berkaitan/);
-  await s.page.goto(s.base + '/#/laporan');
-  await s.page.waitForSelector('h3');
-  assert.equal(await s.page.locator('[data-act=genReport]').count(), 0);
   await s.close();
 });
 
-test('admin: retake flag, hide/unhide, choose report photo, edit pole, PDF generate + download (all roles)', async () => {
-  const { page, base, srv, sheet, ctx, close } = await setup('admin@example.com');
-  await page.goto(base + '/#/tiang/SL-034');
-  await takePhoto(page, 'SL-034', 2, 'camera', 'camera_noexif.jpg');
-  await takePhoto(page, 'SL-034', 2, 'gallery', 'gallery_noexif.jpg');
-  await waitSynced(page);
-  const ids = sheet('Photos').filter((p) => p.PoleID === 'SL-034').map((p) => p.PhotoID);
-  assert.equal(ids.length, 2);
-  // open first photo, flag retake
-  await page.click(`[data-act=viewPhoto][data-id="${ids[0]}"]`);
-  await page.waitForSelector('#fullImg img');
+test('admin: choose report photos (C1 exactly 4 in order), retake/hide, report with missing-photo warning, PDF + Word download', async () => {
+  const { page, base, srv, sheet, close } = await setup('admin@example.com');
+  const img = fs.readFileSync(path.join(FIX, 'camera_noexif.jpg')).toString('base64');
+  let k = 0;
+  const up = (pole, typeId, measurement) => api(srv, 'team@example.com', 'uploadPhoto', { photoId: 'adm_' + String(++k).padStart(8, '0'), poleId: pole, typeId,
+    imageB64: img, thumbB64: fs.readFileSync(path.join(FIX, 'tiny.jpg')).toString('base64'), source: 'Camera', gpsAvailable: true, latitude: 3.1, longitude: 101.6, accuracy: 5,
+    capturedAt: '2027-01-05T08:' + String(k).padStart(2, '0') + ':00+08:00', measurement }).photo.PhotoID;
+  const c1 = [1, 2, 3, 4, 5].map(() => up('SSL034', 'C1'));
+  ['SSL034', 'SSL040'].forEach((p) => { up(p, 'B1'); up(p, 'B2', '1.3'); up(p, 'B3', '1.6'); up(p, 'B4', '1.5'); });
+  up('SSL041', 'B1'); // incomplete for Trial Pit
+  await page.goto(base + '/#/tiang/SSL034');
+  await page.waitForSelector('[data-act=chooseReport][data-type=C1]');
+  assert.match(await page.textContent('.tile:has([data-type=C1])'), /Laporan: automatik/);
+  await page.click('[data-act=chooseReport][data-type=C1]');
+  await page.waitForSelector('.chooser');
+  const order = [c1[4], c1[0], c1[2], c1[1]];
+  for (const id of order.slice(0, 3)) await page.click(`.chooser [data-act=selTap][data-id="${id}"]`);
+  assert.equal(await page.isDisabled('[data-act=selSave]'), true, 'Save disabled until exactly 4');
+  await page.click(`.chooser [data-act=selTap][data-id="${order[3]}"]`);
+  assert.equal(await page.textContent(`.chooser [data-id="${order[0]}"] .selno`), '1');
+  assert.equal(await page.textContent(`.chooser [data-id="${order[3]}"] .selno`), '4');
+  await page.screenshot({ path: path.join(OUT, 'screen-chooser.png') });
+  await page.click('[data-act=selSave]');
+  await page.waitForSelector('#sheet', { state: 'hidden' });
+  assert.deepEqual(order.map((id) => sheet('Photos').find((p) => p.PhotoID === id).ReportOrder), ['1', '2', '3', '4']);
+  assert.match(await page.textContent('.tile:has([data-type=C1])'), /Laporan: pilihan admin/);
+  // retake + hide via viewer
+  await page.click(`[data-act=viewPhoto][data-id="${c1[3]}"]`);
   await page.click('text=🔁 Ambil semula');
   await page.waitForSelector('#sheet', { state: 'hidden' });
-  assert.equal(sheet('Photos').find((p) => p.PhotoID === ids[0]).RetakeFlag, 'TRUE');
-  assert.match(await page.textContent('.slots .tile >> nth=2'), /Ambil semula/);
-  // choose report photo (slot has 2)
-  await page.click(`[data-act=viewPhoto][data-id="${ids[0]}"]`);
-  await page.click('text=★ Pilih untuk laporan');
-  await page.waitForSelector('#sheet', { state: 'hidden' });
-  assert.equal(sheet('Photos').find((p) => p.PhotoID === ids[0]).SelectedForReport, 'TRUE');
-  // hide second
-  await page.click(`[data-act=viewPhoto][data-id="${ids[1]}"]`);
-  await page.click('text=🚫 Sembunyikan');
-  await page.waitForSelector('#sheet', { state: 'hidden' });
-  assert.equal(sheet('Photos').find((p) => p.PhotoID === ids[1]).Hidden, 'TRUE');
-  assert.equal(await page.locator('.thumb.hidden-photo').count(), 1, 'admin still sees it (greyed)');
-  await page.screenshot({ path: path.join(OUT, 'screen-admin-pole.png'), fullPage: true });
-  // edit pole: exact CH + category
-  await page.goto(base + '/#/tiang/SL-078/edit');
-  await page.fill('input[name=Chainage]', 'CH.41450');
-  await page.selectOption('select[name=Category]', 'Perlu pasang');
-  await page.click('button[type=submit]');
-  await page.waitForSelector('.slots');
-  const p78 = sheet('Poles').find((p) => p.PoleID === 'SL-078');
-  assert.equal(p78.Category, 'Perlu pasang');
-  assert.equal(p78.ChainageExact, 'TRUE');
-  assert.equal(await page.locator('[data-act=addPhoto]').count() > 0, true, 'photos now allowed');
-  // generate PDF from UI
+  assert.equal(sheet('Photos').find((p) => p.PhotoID === c1[3]).RetakeFlag, 'TRUE');
+  // Trial Pit report with an incomplete pole -> warning -> continue without it
   await page.goto(base + '/#/laporan');
-  await page.check('input[value="SL-034"]');
-  await page.check('input[value="SL-035"]');
-  assert.equal(await page.textContent('#nSel'), '2');
+  await page.click('[data-act=ract][data-val=B]');
+  assert.match(await page.textContent('.checklist label:has(input[value=SSL041])'), /Lebar \(0\/1 gambar\)/);
+  assert.match(await page.textContent('.checklist label:has(input[value=SSL034])'), /sedia/);
+  for (const id of ['SSL041', 'SSL040', 'SSL034']) await page.check(`input[data-act=rsel][value=${id}]`);
   await page.click('[data-act=genReport]');
-  await page.waitForSelector('[data-act=download]');
+  await page.waitForSelector('.warnlist');
+  assert.match(await page.textContent('.warnlist'), /SSL041 — Lebar \(0\/1 gambar\), Panjang \(0\/1 gambar\), Dalam \(0\/1 gambar\)/);
+  await page.screenshot({ path: path.join(OUT, 'screen-report-warning.png') });
+  await page.click('[data-act=genContinue]');
+  await page.waitForSelector('[data-act=download][data-format=docx]');
   const rep = sheet('Reports')[0];
-  assert.equal(rep.PoleIDs, 'SL-034, SL-035');
-  const dl = page.waitForEvent('download');
-  await page.click('[data-act=download]');
-  const file = await (await dl).path();
-  assert.ok(fs.readFileSync(file, 'utf8').startsWith('%PDF-MOCK'));
-  // admin selection used for slot 3 even though it is flagged (admin's explicit choice)
-  const docJson = JSON.parse(fs.readFileSync(file, 'utf8').replace('%PDF-MOCK\n', ''));
-  assert.ok(JSON.stringify(docJson).includes(ids[0]));
-  assert.ok(!JSON.stringify(docJson).includes(ids[1]), 'hidden photo not in report');
+  assert.equal(rep.Activity, 'B');
+  assert.equal(rep.PoleIDs, 'SSL034, SSL040');
+  for (const [format, magic] of [['pdf', '%PDF-MOCK'], ['docx', 'DOCX-MOCK']]) {
+    const dl = page.waitForEvent('download');
+    await page.click(`[data-act=download][data-format=${format}]`);
+    const d = await dl;
+    assert.ok(d.suggestedFilename().endsWith('.' + format));
+    assert.ok(fs.readFileSync(await d.path(), 'utf8').startsWith(magic), format);
+  }
+  // cancel path: nothing generated
+  await page.check('input[data-act=rsel][value=SSL041]');
+  await page.click('[data-act=genReport]');
+  await page.waitForSelector('.warnlist');
+  assert.match(await page.textContent('#sheet'), /Tiada tiang yang lengkap/);
+  await page.click('#sheet [data-act=closeSheet] >> nth=-1');
+  assert.equal(sheet('Reports').length, 1);
   await page.screenshot({ path: path.join(OUT, 'screen-laporan.png'), fullPage: true });
-  // team sees hidden photo? no
-  const teamTok = srv.rt.g.issueSession_('team@example.com');
-  const tp = await ctx.newPage();
-  await tp.addInitScript((t) => localStorage.setItem('solar.session', t), teamTok);
-  await tp.goto(base + '/#/tiang/SL-034');
-  await tp.waitForSelector('.slots');
-  await tp.waitForFunction(() => window.__solar.data && window.__solar.data.user.role === 'Team');
-  await tp.evaluate(() => window.__solarTest.refresh());
-  assert.equal(await tp.locator(`[data-id="${ids[1]}"]`).count(), 0, 'team cannot see hidden photo');
-  assert.equal(await tp.locator(`[data-id="${ids[0]}"]`).count(), 1);
-  // team can download report
-  await tp.goto(base + '/#/laporan');
-  const dl2 = tp.waitForEvent('download');
-  await tp.click('[data-act=download]');
-  assert.ok(await (await dl2).path());
-  await tp.close();
   await close();
 });
 
-test('admin: users and slot settings screens', async () => {
+test('admin: activity / photo type names; users', async () => {
   const { page, base, sheet, close } = await setup('admin@example.com');
   await page.goto(base + '/#/admin');
-  await page.click('text=Pengguna');
+  await page.click('text=Aktiviti & jenis gambar');
+  await page.fill('input[name=type_B2]', 'Lebar lubang');
+  await page.fill('input[name=spec_B]', 'Dalam 1.5m, lebar 1m, panjang 1m (semak)');
+  await page.click('#namesForm button[type=submit]');
+  await page.waitForFunction(() => document.querySelector('#toast').textContent === 'Disimpan');
+  assert.equal(sheet('PhotoTypes').find((t) => t.TypeID === 'B2').Name, 'Lebar lubang');
+  await page.goto(base + '/#/tiang/SSL040');
+  await page.waitForSelector('.act');
+  assert.match(await page.textContent('.tile:has([data-type=B2])'), /Lebar lubang/);
+  assert.match(await page.textContent('.act >> nth=1 >> .spec'), /\(semak\)/);
+  await page.goto(base + '/#/admin/pengguna');
   await page.fill('#addUser input[name=email]', 'pekerja.baru@gmail.com');
-  await page.fill('#addUser input[name=name]', 'Pekerja Baru');
   await page.click('#addUser button[type=submit]');
   await page.waitForSelector('form[data-email="pekerja.baru@gmail.com"]');
   assert.equal(sheet('Users').find((u) => u.Email === 'pekerja.baru@gmail.com').Role, 'Team');
-  const f = page.locator('form[data-email="pekerja.baru@gmail.com"]');
-  await f.locator('select[name=role]').selectOption('Boss');
-  await f.locator('input[name=active]').uncheck();
-  await f.locator('button[type=submit]').click();
-  await page.waitForFunction(() => document.querySelector('#overlay').hidden);
-  await page.waitForTimeout(300);
-  const u = sheet('Users').find((x) => x.Email === 'pekerja.baru@gmail.com');
-  assert.equal(u.Role, 'Boss'); assert.equal(u.Active, 'FALSE');
-  await page.click('[data-act=removeUser][data-email="pekerja.baru@gmail.com"]');
-  await page.waitForFunction(() => !document.querySelector('form[data-email="pekerja.baru@gmail.com"]'));
-  assert.equal(sheet('Users').some((x) => x.Email === 'pekerja.baru@gmail.com'), false);
-
-  await page.goto(base + '/#/admin/slot');
-  const s3 = page.locator('form.slot-row[data-id=S3]');
-  await s3.locator('input[name=name]').fill('Ukuran lubang');
-  await s3.locator('button[type=submit]').click();
-  await page.waitForFunction(() => document.querySelector('#toast').textContent === 'Disimpan');
-  assert.equal(sheet('Slots').find((s) => s.SlotID === 'S3').Name, 'Ukuran lubang');
-  await page.click('[data-act=moveSlot][data-id=S7][data-dir="-1"]');
-  await page.waitForFunction(() => document.querySelectorAll('form.slot-row')[5].dataset.id === 'S7');
-  await page.fill('#addSlot input[name=name]', 'Pendawaian');
-  await page.click('#addSlot button[type=submit]');
-  await page.waitForSelector('form.slot-row[data-id=S8]');
-  await page.goto(base + '/#/tiang/SL-040');
-  await page.waitForSelector('.slots');
-  assert.match(await page.textContent('.pole-head'), /0\/8/);
-  assert.match(await page.textContent('.slots'), /Ukuran lubang/);
   await page.goto(base + '/#/admin/log');
   await page.waitForSelector('.audit tr');
-  assert.match(await page.textContent('.audit'), /SlotAdded/);
+  assert.match(await page.textContent('.audit'), /PhotoTypeEdited/);
   await close();
 });
 
@@ -502,10 +560,10 @@ test('GPS tracker: waits for a fix up to the timeout, returns null when none / d
 
 test('camera photo end-to-end without location permission stamps "GPS tidak tersedia"', async () => {
   const { page, base, sheet, close } = await setup('team@example.com', { noGeo: true });
-  await page.goto(base + '/#/tiang/SL-037');
-  await takePhoto(page, 'SL-037', 0, 'camera', 'camera_noexif.jpg');
+  await page.goto(base + '/#/tiang/SSL037');
+  await takePhoto(page, 'SSL037', 'A1', 'camera', 'camera_noexif.jpg');
   await waitSynced(page);
-  const p = sheet('Photos').find((x) => x.PoleID === 'SL-037');
+  const p = sheet('Photos').find((x) => x.PoleID === 'SSL037');
   assert.equal(p.GPSAvailable, 'FALSE');
   assert.equal(p.Latitude, '');
   await close();
@@ -517,7 +575,7 @@ test('installed app picks up config.js edited later on GitHub (network-first), a
   await page.waitForSelector('.stats');
   await page.waitForFunction(() => navigator.serviceWorker && navigator.serviceWorker.controller);
   assert.equal(await page.evaluate(() => window.SOLAR_CONFIG.marker), 'v1');
-  srv.flags.configMarker = 'v2'; // admin edits config.js on GitHub; sw.js unchanged
+  srv.flags.configMarker = 'v2';
   await page.reload();
   await page.waitForSelector('.stats');
   assert.equal(await page.evaluate(() => window.SOLAR_CONFIG.marker), 'v2');

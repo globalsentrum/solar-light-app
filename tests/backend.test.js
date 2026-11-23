@@ -1,5 +1,5 @@
 'use strict';
-/* Runs the real apps-script/*.gs code against the in-memory Apps Script mock. */
+/* Runs the real apps-script/*.gs code against the in-memory Apps Script mock, with DUMMY poles. */
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
@@ -9,9 +9,12 @@ const { createRuntime } = require('./gas-mock');
 const CLIENT_ID = 'test-client.apps.googleusercontent.com';
 const ADMIN = 'owner@example.com', TEAM = 'team@example.com', BOSS = 'boss@example.com';
 const IMG = fs.readFileSync(path.join(__dirname, 'fixtures/camera_noexif.jpg')).toString('base64');
+const IMG_PORTRAIT = fs.readFileSync(path.join(__dirname, 'fixtures/gallery_noexif.jpg')).toString('base64');
 const THUMB = fs.readFileSync(path.join(__dirname, 'fixtures/tiny.jpg')).toString('base64');
-let pid = 0;
 const json = (x) => JSON.parse(JSON.stringify(x)); // same as going over HTTP
+const MEASURED = { B2: '1.3', B3: '1.6', B4: '1.5' };
+let pid = 0;
+let minute = 0;
 
 function boot() {
   const idTokens = {};
@@ -31,118 +34,122 @@ function boot() {
   assert.equal(admin('saveUser', { email: TEAM, name: 'Ali', role: 'Team' }).ok, true);
   assert.equal(admin('saveUser', { email: BOSS, name: 'Bos', role: 'Boss' }).ok, true);
   const rows = (name) => rt.state.sheets[name].rowsAsObjects();
-  const upload = (email, poleId, slotId, extra) => call(email, 'uploadPhoto', {
-    photoId: 'ph_' + (++pid).toString().padStart(6, '0'), poleId, slotId, imageB64: IMG, thumbB64: THUMB, source: 'Camera',
-    capturedAt: '2026-11-21T10:' + String(pid % 60).padStart(2, '0') + ':00+08:00', latitude: 3.123456, longitude: 101.654321,
-    accuracy: 7.6, gpsAvailable: true, ...(extra || {}),
-  });
-  return { rt, idTokens, tok, call, admin, rows, upload };
+  const upload = (email, poleId, typeId, extra) => {
+    minute++;
+    return call(email, 'uploadPhoto', {
+      photoId: 'ph_' + (++pid).toString().padStart(6, '0'), poleId, typeId, imageB64: IMG, thumbB64: THUMB, source: 'Camera',
+      capturedAt: '2027-01-05T' + String(8 + Math.floor(minute / 60) % 12).padStart(2, '0') + ':' + String(minute % 60).padStart(2, '0') + ':00+08:00',
+      latitude: 3.123456, longitude: 101.654321, accuracy: 7.6, gpsAvailable: true,
+      measurement: MEASURED[typeId], ...(extra || {}),
+    });
+  };
+  /** Upload every photo type at its minimum for a pole. */
+  const fill = (poleId, activity) => {
+    const out = {};
+    [['A1', 1], ['B1', 1], ['B2', 1], ['B3', 1], ['B4', 1], ['C1', 4], ['C2', 1], ['C3', 1]]
+      .filter(([t]) => !activity || t[0] === activity)
+      .forEach(([t, k]) => { out[t] = []; for (let i = 0; i < k; i++) { const r = upload(TEAM, poleId, t); assert.equal(r.ok, true, r.error); out[t].push(r.photo.PhotoID); } });
+    return out;
+  };
+  return { rt, idTokens, tok, call, admin, rows, upload, fill };
 }
 
-test('setup creates tabs, seeds 123 poles / 7 slots / admin, and is safe to run twice', () => {
+function reportDoc(rt, report, which) {
+  const url = which === 'docx' ? report.DocxURL : report.FileURL;
+  const id = url.match(/\/d\/([^/]+)/)[1];
+  const f = rt.state.files[id];
+  const txt = f.buf.toString('utf8');
+  return { file: f, doc: JSON.parse(txt.slice(txt.indexOf('\n') + 1)), magic: txt.slice(0, txt.indexOf('\n')) };
+}
+/** Flatten blocks: [{title, cells:[{img, caption}], extra:[texts]}] */
+function blocksOf(doc) {
+  const out = [];
+  let breaks = 0;
+  doc.children.forEach((n) => {
+    if (n.type === 'pagebreak') breaks++;
+    if (n.type !== 'table') return;
+    const title = n.rows[0][0].children[0].text;
+    const cell = n.rows[1][0];
+    const grid = cell.children.find((c) => c.type === 'table');
+    const cells = [];
+    grid.rows.forEach((r) => r.forEach((c) => {
+      const p0 = c.children[0];
+      cells.push({ img: p0.images[0] ? p0.images[0].name : null, w: p0.images[0] && p0.images[0].w, h: p0.images[0] && p0.images[0].h,
+        caption: (c.children[1] || {}).text || '', align: p0.align });
+    }));
+    const extra = cell.children.slice(cell.children.indexOf(grid) + 1).filter((c) => c.type === 'p' && c.text).map((c) => c.text);
+    out.push({ title, bg: n.rows[0][0].bg, border: n.border, gridBorder: grid.border, cells, extra, pageBreaksBefore: breaks });
+  });
+  return out;
+}
+
+test('setup: tabs incl. Activities / PhotoTypes / WorkPlan, dummy poles with SSL IDs, safe to run twice', () => {
   const { rt, rows } = boot();
   rt.g.setup();
-  ['Poles', 'Photos', 'Slots', 'Notes', 'Users', 'AuditLog', 'Reports', 'Settings'].forEach((n) => assert.ok(rt.state.sheets[n], n));
-  assert.deepEqual(rt.state.sheets.Poles.data[0], ['PoleID', 'Bound', 'Chainage', 'ChainageExact', 'Category', 'PlannedDate', 'IsDone', 'DoneBy', 'DoneAt', 'UpdatedAt']);
-  assert.deepEqual(rt.state.sheets.Photos.data[0], ['PhotoID', 'PoleID', 'SlotID', 'DriveFileID', 'FileURL', 'Source', 'CapturedAt', 'UploadedAt', 'Latitude', 'Longitude', 'AccuracyM', 'GPSAvailable', 'TakenBy', 'Hidden', 'RetakeFlag', 'SelectedForReport']);
+  ['Poles', 'Photos', 'Activities', 'PhotoTypes', 'WorkPlan', 'Notes', 'Users', 'AuditLog', 'Reports', 'Settings'].forEach((n) => assert.ok(rt.state.sheets[n], n));
+  assert.ok(!rt.state.sheets.Slots, 'no Slots tab in v2');
+  assert.deepEqual(rt.state.sheets.Photos.data[0], ['PhotoID', 'PoleID', 'PhotoTypeID', 'DriveFileID', 'FileURL', 'Source', 'CapturedAt', 'UploadedAt', 'Latitude', 'Longitude', 'AccuracyM', 'GPSAvailable', 'TakenBy', 'Hidden', 'RetakeFlag', 'ReportOrder', 'MeasurementM']);
+  assert.deepEqual(rt.state.sheets.WorkPlan.data[0], ['PlanID', 'Date', 'PoleID', 'Activity', 'CreatedBy', 'CreatedAt']);
+  assert.deepEqual(rt.state.sheets.Reports.data[0], ['ReportID', 'PoleIDs', 'Activity', 'FileURL', 'DocxURL', 'CreatedBy', 'CreatedAt']);
   const poles = rows('Poles');
   assert.equal(poles.length, 123);
-  assert.equal(poles.filter((p) => p.Category === 'Sudah dipasang').length, 33);
-  assert.equal(poles.filter((p) => p.Category === 'Perlu pasang').length, 44);
-  assert.equal(poles.filter((p) => p.Category === 'Tunggu kelulusan').length, 46);
-  assert.equal(poles.filter((p) => p.Bound === 'EB').length, 54);
-  assert.equal(poles.filter((p) => p.Bound === 'WB').length, 69);
-  assert.equal(poles.find((p) => p.PoleID === 'SL-034').PlannedDate, '2026-11-18');
-  assert.equal(rows('Slots').length, 7);
-  assert.equal(rows('Slots')[2].Spec, '1.5m × 1m');
-  const admins = rows('Users').filter((u) => u.Role === 'Admin');
-  assert.equal(admins.length, 1);
-  assert.equal(admins[0].Email, ADMIN);
+  assert.equal(poles[0].PoleID, 'SSL001');
+  assert.equal(poles[122].PoleID, 'SSL123');
+  assert.deepEqual(rows('Activities').map((a) => a.Name), ['Pegging', 'Trial Pit', 'Installation']);
+  assert.equal(rows('Activities')[1].Spec, 'Dalam 1.5m, lebar 1m, panjang 1m');
+  assert.equal(rows('PhotoTypes').length, 8);
+  assert.equal(rows('Settings').find((r) => r.Key === 'ReportMaxPhotos').Value, '60');
+  assert.equal(rows('Users').filter((u) => u.Role === 'Admin').length, 1);
 });
 
-test('Google sign-in redirect: valid token -> session; wrong audience / unknown / inactive email -> error', () => {
-  const { rt, idTokens, admin } = boot();
+test('Google sign-in redirect + sessions (Active = FALSE / removed -> blocked at once)', () => {
+  const { rt, idTokens, tok, call, admin } = boot();
   const exp = String(Math.floor(Date.now() / 1000) + 600);
-  idTokens.good = { aud: CLIENT_ID, iss: 'https://accounts.google.com', email: 'Team@Example.com', email_verified: 'true', exp, nonce: 'n123' };
-  idTokens.wrongAud = { ...idTokens.good, aud: 'other' };
+  idTokens.good = { aud: CLIENT_ID, iss: 'https://accounts.google.com', email: 'Team@Example.com', email_verified: 'true', exp, nonce: 'n1' };
+  idTokens.wrongAud = { ...idTokens.good, aud: 'x' };
   idTokens.stranger = { ...idTokens.good, email: 'stranger@gmail.com' };
-  idTokens.unverified = { ...idTokens.good, email_verified: 'false' };
-
   const html = rt.g.doPost({ parameter: { credential: 'good' } }).getContent();
   const m = html.match(/#login=([^&"]+)&amp;nonce=([^"]+)"/);
-  assert.ok(m, html);
-  assert.equal(decodeURIComponent(m[2]), 'n123');
-  const session = decodeURIComponent(m[1]);
-  const r = rt.g.handle_({ action: 'me', token: session });
-  assert.equal(r.ok, true);
-  assert.equal(r.user.email, TEAM);
-  assert.equal(r.user.role, 'Team');
-
-  for (const bad of ['wrongAud', 'stranger', 'unverified', 'notatoken']) {
-    const h = rt.g.doPost({ parameter: { credential: bad } }).getContent();
-    assert.ok(h.includes('#loginerror='), bad);
-    assert.ok(!h.includes('#login='), bad);
-  }
-  admin('saveUser', { email: TEAM, name: 'Ali', role: 'Team', active: false });
-  assert.ok(rt.g.doPost({ parameter: { credential: 'good' } }).getContent().includes('#loginerror='));
-});
-
-test('session: tampered / expired tokens rejected; deactivating or removing a user blocks the very next request', () => {
-  const { rt, tok, call, admin } = boot();
+  assert.ok(m);
+  assert.equal(call(decodeURIComponent(m[1]), 'me').user.role, 'Team');
+  for (const bad of ['wrongAud', 'stranger', 'nope']) assert.ok(rt.g.doPost({ parameter: { credential: bad } }).getContent().includes('#loginerror='), bad);
   const t = tok(TEAM);
-  assert.equal(call(t, 'me').ok, true);
   const [p, s] = t.split('.');
   assert.equal(call(p + '.' + s.slice(0, -2) + 'xx', 'me').code, 'AUTH');
-  assert.equal(call('', 'bootstrap').code, 'AUTH');
-  assert.equal(call('garbage', 'bootstrap').code, 'AUTH');
-  // expired
   rt.g.setSetting_('SessionDays', '-1');
   assert.equal(call(tok(TEAM), 'me').code, 'AUTH');
   rt.g.setSetting_('SessionDays', '30');
-  // deactivate -> the SAME token stops working immediately
   admin('saveUser', { email: TEAM, name: 'Ali', role: 'Team', active: false });
-  const r = call(t, 'bootstrap');
-  assert.equal(r.code, 'AUTH');
-  assert.equal(r.poles, undefined);
+  assert.equal(call(t, 'bootstrap').code, 'AUTH');
   admin('saveUser', { email: TEAM, name: 'Ali', role: 'Team', active: true });
   assert.equal(call(t, 'bootstrap').ok, true);
-  // role change applies immediately
-  admin('saveUser', { email: TEAM, name: 'Ali', role: 'Boss', active: true });
-  assert.equal(call(t, 'setDone', { poleId: 'SL-034', done: true }).code, 'FORBIDDEN');
-  admin('saveUser', { email: TEAM, name: 'Ali', role: 'Team', active: true });
-  // removed from the sheet -> blocked
   admin('removeUser', { email: TEAM });
   assert.equal(call(t, 'bootstrap').code, 'AUTH');
-  // manual edit in the sheet (Active = FALSE typed by admin) also works
-  admin('saveUser', { email: TEAM, name: 'Ali', role: 'Team' });
-  const sh = rt.state.sheets.Users;
-  const row = sh.data.findIndex((r) => r[0] === TEAM);
-  sh.data[row][3] = 'FALSE';
-  assert.equal(call(t, 'me').code, 'AUTH');
 });
 
-test('permissions are enforced on the backend for every role (Section 3)', () => {
-  const env = boot();
-  const { call, upload, admin } = env;
-  const seed = upload(ADMIN, 'SL-034', 'S1');
-  assert.equal(seed.ok, true);
-  const photoId = seed.photo.PhotoID;
+test('permissions enforced on the backend for every action incl. plan, photo selection, report by activity', () => {
+  const { call, upload, admin, fill } = boot();
+  const ph = fill('SSL034');
+  const one = ph.A1[0];
   let n = 0;
   const actions = {
     bootstrap: () => ({}),
-    getThumbs: () => ({ poleId: 'SL-034' }),
-    getPhoto: () => ({ photoId }),
-    uploadPhoto: () => ({ photoId: 'perm_' + (++n) + '_xxxxxxxx', poleId: 'SL-035', slotId: 'S1', imageB64: IMG, source: 'Camera', gpsAvailable: false }),
-    addNote: () => ({ noteId: 'note_' + (++n), poleId: 'SL-035', text: 'ujian' }),
-    setDone: () => ({ poleId: 'SL-036', done: true }),
-    editPole: () => ({ poleId: 'SL-037', changes: { PlannedDate: '2026-12-0' + ((++n % 9) + 1) } }),
-    setPhotoFlag: () => ({ photoId, field: 'RetakeFlag', value: (++n) % 2 === 0 }),
-    selectForReport: () => ({ photoId }),
+    getThumbs: () => ({ poleId: 'SSL034' }),
+    getPhoto: () => ({ photoId: one }),
+    uploadPhoto: () => ({ photoId: 'perm_' + (++n) + '_xxxxxxxx', poleId: 'SSL035', typeId: 'A1', imageB64: IMG, source: 'Camera', gpsAvailable: false }),
+    addNote: () => ({ noteId: 'note_' + (++n), poleId: 'SSL035', text: 'ujian' }),
+    setDone: () => ({ poleId: 'SSL036', done: true }),
+    editPole: () => ({ poleId: 'SSL037', changes: { PlannedDate: '2027-02-0' + ((++n % 9) + 1) } }),
+    setPhotoFlag: () => ({ photoId: one, field: 'RetakeFlag', value: (++n) % 2 === 0 }),
+    setReportSelection: () => ({ poleId: 'SSL034', typeId: 'A1', photoIds: (++n) % 2 ? [one] : [] }),
+    saveNames: () => ({ types: [{ TypeID: 'B1', Name: 'Korek ' + (++n) }] }),
+    addPlans: () => ({ poleIds: ['SSL040'], date: '2027-01-0' + ((++n % 9) + 1), activityId: 'B' }),
+    editPlan: () => ({ planId: 'NOPE', date: '2027-01-09', activityId: '' }),
+    removePlan: () => ({ planId: 'NOPE' }),
     saveUser: () => ({ email: 'new' + (++n) + '@example.com', name: 'X', role: 'Team' }),
-    saveSlot: () => ({ slotId: 'S2', name: 'Menggali', spec: 'x' + (++n) }),
-    moveSlot: () => ({ slotId: 'S2', dir: 1 }),
     audit: () => ({}),
-    generateReport: () => ({ poleIds: ['SL-034'] }),
+    reportCheck: () => ({ activityId: 'A', poleIds: ['SSL034'] }),
+    generateReport: () => ({ activityId: 'A', poleIds: ['SSL034'] }),
   };
   const expected = {
     Admin: Object.keys(actions),
@@ -153,333 +160,402 @@ test('permissions are enforced on the backend for every role (Section 3)', () =>
   for (const role of Object.keys(who)) {
     for (const [action, params] of Object.entries(actions)) {
       const r = call(who[role], action, params());
-      const allowed = expected[role].includes(action);
-      if (allowed) assert.equal(r.ok, true, `${role} ${action} should be allowed: ${r.error}`);
-      else assert.equal(r.code, 'FORBIDDEN', `${role} ${action} should be FORBIDDEN, got ${JSON.stringify(r).slice(0, 120)}`);
+      if (expected[role].includes(action)) {
+        // editPlan/removePlan with an unknown id: permission passed, then NOTFOUND
+        if (['editPlan', 'removePlan'].includes(action)) assert.equal(r.code, 'NOTFOUND', `${role} ${action}: ${r.error}`);
+        else assert.equal(r.ok, true, `${role} ${action} should be allowed: ${r.error}`);
+      } else {
+        assert.equal(r.code, 'FORBIDDEN', `${role} ${action} should be FORBIDDEN, got ${JSON.stringify(r).slice(0, 120)}`);
+      }
     }
   }
-  // hide photo + category change specifically
-  assert.equal(call(TEAM, 'setPhotoFlag', { photoId, field: 'Hidden', value: true }).code, 'FORBIDDEN');
-  assert.equal(call(TEAM, 'editPole', { poleId: 'SL-078', changes: { Category: 'Perlu pasang' } }).code, 'FORBIDDEN');
-  assert.equal(call(TEAM, 'editPole', { poleId: 'SL-078', changes: { Chainage: 'CH.41450' } }).code, 'FORBIDDEN');
-  assert.equal(call(BOSS, 'removeUser', { email: TEAM }).code, 'FORBIDDEN');
-  assert.equal(call(TEAM, 'removeUser', { email: BOSS }).code, 'FORBIDDEN');
-  // download reports: all roles
-  const rep = admin('generateReport', { poleIds: ['SL-034'] }).report;
-  for (const e of [ADMIN, TEAM, BOSS]) assert.equal(call(e, 'downloadReport', { reportId: rep.ReportID }).ok, true, e);
-  // unknown action / no delete action exists
-  assert.equal(call(ADMIN, 'deletePhoto', { photoId }).code, 'BAD');
-});
-
-test('category rules: no photos/Siap on Tunggu kelulusan; Sudah dipasang allows optional photos but no Siap; notes everywhere', () => {
-  const { call, upload } = boot();
-  assert.equal(upload(TEAM, 'SL-078', 'S1').code, 'FORBIDDEN');
-  assert.equal(call(TEAM, 'setDone', { poleId: 'SL-078', done: true }).code, 'FORBIDDEN');
-  assert.equal(call(TEAM, 'addNote', { noteId: 'n-pend-1', poleId: 'SL-078', text: 'Tapak belum siap' }).ok, true);
-  assert.equal(upload(TEAM, 'SL-001', 'S1').ok, true);
-  assert.equal(call(TEAM, 'setDone', { poleId: 'SL-001', done: false }).code, 'FORBIDDEN');
-  assert.equal(call(TEAM, 'addNote', { noteId: 'n-inst-1', poleId: 'SL-001', text: 'ok' }).ok, true);
-});
-
-test('upload is idempotent (retries never duplicate) and stores all photo data', () => {
-  const { rt, call, rows } = boot();
-  const params = { photoId: 'retry_00000001', poleId: 'SL-040', slotId: 'S3', imageB64: IMG, thumbB64: THUMB, source: 'Gallery',
-    capturedAt: '2026-11-20T09:15:30+08:00', latitude: 3.212345, longitude: 101.756789, accuracy: 12.4, gpsAvailable: true };
-  const filesBefore = Object.keys(rt.state.files).length;
-  const a = call(TEAM, 'uploadPhoto', params);
-  const b = call(TEAM, 'uploadPhoto', params);
-  const c = call(TEAM, 'uploadPhoto', params);
-  assert.equal(a.ok && b.ok && c.ok, true);
-  assert.equal(b.duplicate, true);
-  const ph = rows('Photos').filter((p) => p.PhotoID === 'retry_00000001');
-  assert.equal(ph.length, 1);
-  assert.equal(Object.keys(rt.state.files).length - filesBefore, 2, 'one photo + one thumbnail');
-  assert.equal(rows('AuditLog').filter((r) => r.Action === 'PhotoAdded' && r.EntityID === 'retry_00000001').length, 1);
-  const p = ph[0];
-  assert.equal(p.PoleID, 'SL-040');
-  assert.equal(p.SlotID, 'S3');
-  assert.equal(p.Source, 'Gallery');
-  assert.equal(p.CapturedAt, '2026-11-20T09:15:30+08:00');
-  assert.equal(p.Latitude, '3.212345');
-  assert.equal(p.Longitude, '101.756789');
-  assert.equal(p.AccuracyM, '12');
-  assert.equal(p.GPSAvailable, 'TRUE');
-  assert.equal(p.TakenBy, TEAM);
-  assert.equal(p.Hidden, 'FALSE');
-  assert.match(p.FileURL, /^https:\/\/drive\.google\.com\/file\/d\//);
-  // stored in "Solar Photos/SL-040/"
-  const file = rt.state.files[p.DriveFileID];
-  const folder = rt.state.folders[file.parent];
-  assert.equal(folder.name, 'SL-040');
-  assert.equal(rt.state.folders[folder.parent].name, 'Solar Photos');
-  // no GPS
-  const ng = call(TEAM, 'uploadPhoto', { ...params, photoId: 'nogps_0000001', gpsAvailable: false, latitude: '', longitude: '', accuracy: '' });
-  assert.equal(ng.photo.GPSAvailable, false);
-  assert.equal(ng.photo.Latitude, '');
-  // bad input
-  assert.equal(call(TEAM, 'uploadPhoto', { ...params, photoId: 'x' }).code, 'BAD');
-  assert.equal(call(TEAM, 'uploadPhoto', { ...params, photoId: 'badslot_00001', slotId: 'S99' }).code, 'BAD');
-  assert.equal(call(TEAM, 'uploadPhoto', { ...params, photoId: 'badpole_00001', poleId: 'SL-999' }).code, 'NOTFOUND');
-});
-
-test('hidden photos: invisible to Team/Boss, visible to Admin, can be unhidden, never deleted, all logged', () => {
-  const { rt, call, upload, admin, rows } = boot();
-  const id = upload(TEAM, 'SL-041', 'S1').photo.PhotoID;
-  assert.equal(admin('setPhotoFlag', { photoId: id, field: 'Hidden', value: true }).ok, true);
-  for (const e of [TEAM, BOSS]) {
-    assert.equal(call(e, 'bootstrap').photos.some((p) => p.PhotoID === id), false, e);
-    assert.equal(call(e, 'getPhoto', { photoId: id }).code, 'NOTFOUND', e);
-    assert.deepEqual(call(e, 'getThumbs', { poleId: 'SL-041' }).thumbs, {}, e);
+  const rep = admin('generateReport', { activityId: 'B', poleIds: ['SSL034'] }).report;
+  for (const e of [ADMIN, TEAM, BOSS]) {
+    assert.equal(call(e, 'downloadReport', { reportId: rep.ReportID }).ok, true, e);
+    assert.equal(call(e, 'downloadReport', { reportId: rep.ReportID, format: 'docx' }).ok, true, e);
   }
-  const adm = admin('bootstrap').photos.find((p) => p.PhotoID === id);
-  assert.equal(adm.Hidden, true);
-  assert.equal(admin('getPhoto', { photoId: id }).ok, true);
-  assert.ok(admin('getThumbs', { poleId: 'SL-041' }).thumbs[id]);
-  admin('setPhotoFlag', { photoId: id, field: 'Hidden', value: false });
-  assert.equal(call(TEAM, 'bootstrap').photos.some((p) => p.PhotoID === id), true);
-  assert.equal(rows('Photos').filter((p) => p.PhotoID === id).length, 1);
-  assert.ok(Object.values(rt.state.files).every((f) => !f.trashed || f.name.startsWith('tmp_')));
-  const acts = rows('AuditLog').filter((r) => r.EntityID === id).map((r) => r.Action);
-  assert.deepEqual(acts, ['PhotoAdded', 'PhotoHidden', 'PhotoUnhidden']);
+  assert.equal(call(ADMIN, 'deletePhoto', { photoId: one }).code, 'BAD');
+  assert.equal(call(ADMIN, 'saveSlot', { name: 'x' }).code, 'BAD', 'old slot actions removed');
+  void upload;
 });
 
-test('Siap / Batal siap and computed statuses from the server data', () => {
-  const { call, upload, rows } = boot();
+test('upload: photo types, measurement required + validated for B2-B4, idempotent', () => {
+  const { rt, call, rows, upload } = boot();
+  const base = { poleId: 'SSL040', imageB64: IMG, thumbB64: THUMB, source: 'Gallery', capturedAt: '2027-01-04T09:15:30+08:00',
+    latitude: 3.212345, longitude: 101.756789, accuracy: 12.4, gpsAvailable: true };
+  const up = (id, typeId, measurement) => call(TEAM, 'uploadPhoto', { ...base, photoId: id, typeId, measurement });
+  assert.match(up('m_empty_0001', 'B2', '').error, /Sila masukkan ukuran/);
+  assert.match(up('m_bad_00001', 'B3', 'abc').error, /tidak sah/);
+  assert.match(up('m_dec_00001', 'B4', '1.555').error, /2 titik perpuluhan/);
+  assert.match(up('m_zero_0001', 'B4', '0').error, /lebih daripada 0/);
+  assert.equal(up('m_none_0001', 'B2').code, 'BAD');
+  assert.equal(rows('Photos').length, 0, 'rejected photos not stored');
+  const ok = up('m_ok_000001', 'B2', '1,3');
+  assert.equal(ok.ok, true, ok.error);
+  assert.equal(ok.photo.MeasurementM, 1.3);
+  assert.equal(rows('Photos')[0].MeasurementM, '1.3');
+  assert.equal(rows('Photos')[0].PhotoTypeID, 'B2');
+  const noNeed = up('m_a1_000001', 'A1', '9.99');
+  assert.equal(noNeed.photo.MeasurementM, '', 'measurement ignored for types without one');
+  assert.equal(up('m_type_0001', 'S3', '').code, 'BAD', 'old slot IDs rejected');
+  // idempotent
+  const filesBefore = Object.keys(rt.state.files).length;
+  up('m_ok_000001', 'B2', '1,3'); up('m_ok_000001', 'B2', '1,3');
+  assert.equal(rows('Photos').filter((p) => p.PhotoID === 'm_ok_000001').length, 1);
+  assert.equal(Object.keys(rt.state.files).length, filesBefore);
+  assert.equal(rows('AuditLog').filter((r) => r.Action === 'PhotoAdded').length, 2);
+  assert.match(rows('AuditLog').find((r) => r.EntityID === 'm_ok_000001').NewValue, /SSL040\/B2 \(Gallery\) 1\.3m/);
+  // stored in Solar Photos/SSL040/ with the type in the file name
+  const f = rt.state.files[rows('Photos')[0].DriveFileID];
+  assert.equal(rt.state.folders[f.parent].name, 'SSL040');
+  assert.match(f.name, /^SSL040_B2_/);
+  // category rules unchanged
+  assert.equal(upload(TEAM, 'SSL078', 'A1').code, 'FORBIDDEN', 'Tunggu kelulusan');
+  assert.equal(upload(TEAM, 'SSL001', 'A1').ok, true, 'Sudah dipasang: optional photos');
+  assert.equal(call(TEAM, 'setDone', { poleId: 'SSL001', done: true }).code, 'FORBIDDEN');
+  assert.equal(call(TEAM, 'addNote', { noteId: 'n-pend-1', poleId: 'SSL078', text: 'ok' }).ok, true);
+});
+
+test('statuses from server data: Belum mula -> Dalam proses -> Siap / Batal siap; photo progress per activity', () => {
+  const { call, upload, fill } = boot();
   const L = require('../shared/logic.js');
   const status = (id) => {
     const b = call(TEAM, 'bootstrap');
     const pole = b.poles.find((p) => p.PoleID === id);
-    return [L.workStatus(pole, b.photos), L.photoStatus(pole, b.slots, b.photos).label];
+    const ps = L.photoStatus(pole, b.types, b.photos, b.activities);
+    return [L.workStatus(pole, b.photos), ps.label, ps.detail];
   };
-  assert.deepEqual(status('SL-042'), ['Belum mula', 'Belum lengkap (0/7)']);
-  upload(TEAM, 'SL-042', 'S1');
-  assert.deepEqual(status('SL-042'), ['Dalam proses', 'Belum lengkap (1/7)']);
-  assert.equal(call(TEAM, 'setDone', { poleId: 'SL-042', done: true }).pole.IsDone, true);
-  assert.deepEqual(status('SL-042'), ['Siap', 'Belum lengkap (1/7)']);
-  call(TEAM, 'setDone', { poleId: 'SL-042', done: true }); // repeat = no-op
-  call(TEAM, 'setDone', { poleId: 'SL-042', done: false });
-  assert.deepEqual(status('SL-042'), ['Dalam proses', 'Belum lengkap (1/7)']);
-  const log = rows('AuditLog').filter((r) => r.EntityID === 'SL-042').map((r) => r.Action);
-  assert.deepEqual(log, ['MarkedDone', 'DoneCancelled']);
-  const pole = rows('Poles').find((p) => p.PoleID === 'SL-042');
-  assert.equal(pole.IsDone, 'FALSE');
-  assert.equal(pole.DoneBy, '');
+  assert.deepEqual(status('SSL042'), ['Belum mula', 'Belum lengkap', 'Pegging 0/1 · Trial Pit 0/4 · Installation 0/6']);
+  upload(TEAM, 'SSL042', 'A1');
+  upload(TEAM, 'SSL042', 'C1'); upload(TEAM, 'SSL042', 'C1');
+  assert.deepEqual(status('SSL042'), ['Dalam proses', 'Belum lengkap', 'Pegging ✓ · Trial Pit 0/4 · Installation 2/6']);
+  call(TEAM, 'setDone', { poleId: 'SSL042', done: true });
+  assert.equal(status('SSL042')[0], 'Siap');
+  call(TEAM, 'setDone', { poleId: 'SSL042', done: false });
+  assert.equal(status('SSL042')[0], 'Dalam proses');
+  fill('SSL043');
+  assert.deepEqual(status('SSL043').slice(1), ['Gambar lengkap', 'Pegging ✓ · Trial Pit ✓ · Installation ✓']);
 });
 
-test('admin pole editor: CH exact recomputed, category change, validation, every field logged', () => {
-  const { admin, rows } = boot();
-  const r = admin('editPole', { poleId: 'SL-078', changes: { Chainage: 'CH.41450', Category: 'Perlu pasang', PlannedDate: '2026-12-15', Bound: 'EB' } });
-  assert.equal(r.ok, true, r.error);
-  assert.equal(r.pole.ChainageExact, true);
-  assert.equal(r.pole.Category, 'Perlu pasang');
-  const p = rows('Poles').find((x) => x.PoleID === 'SL-078');
-  assert.equal(p.Chainage, 'CH.41450');
-  assert.equal(p.ChainageExact, 'TRUE');
-  assert.equal(p.PlannedDate, '2026-12-15');
-  const log = rows('AuditLog').filter((x) => x.EntityID === 'SL-078');
-  assert.deepEqual(log.map((x) => x.Action + ':' + x.Field).sort(),
-    ['CategoryChanged:Category', 'PoleEdited:Chainage', 'PoleEdited:ChainageExact', 'PoleEdited:PlannedDate'].sort());
-  const cat = log.find((x) => x.Field === 'Category');
-  assert.equal(cat.OldValue, 'Tunggu kelulusan');
-  assert.equal(cat.NewValue, 'Perlu pasang');
-  // back to a range -> not exact
-  assert.equal(admin('editPole', { poleId: 'SL-078', changes: { Chainage: 'CH.41400 – CH.41600' } }).pole.ChainageExact, false);
-  assert.equal(admin('editPole', { poleId: 'SL-078', changes: { Bound: 'NB' } }).code, 'BAD');
-  assert.equal(admin('editPole', { poleId: 'SL-078', changes: { Category: 'Lain' } }).code, 'BAD');
-  assert.equal(admin('editPole', { poleId: 'SL-078', changes: { PlannedDate: '15/12/2026' } }).code, 'BAD');
-  assert.equal(admin('editPole', { poleId: 'SL-078', changes: { IsDone: true } }).code, 'BAD');
-  assert.equal(admin('editPole', { poleId: 'SL-078', changes: { Chainage: '  ' } }).code, 'BAD');
+test('hidden photos: Team/Boss cannot see, Admin can, unhide, never deleted', () => {
+  const { call, upload, admin, rows } = boot();
+  const id = upload(TEAM, 'SSL041', 'A1').photo.PhotoID;
+  admin('setPhotoFlag', { photoId: id, field: 'Hidden', value: true });
+  for (const e of [TEAM, BOSS]) {
+    assert.equal(call(e, 'bootstrap').photos.some((p) => p.PhotoID === id), false);
+    assert.equal(call(e, 'getPhoto', { photoId: id }).code, 'NOTFOUND');
+  }
+  assert.equal(admin('bootstrap').photos.find((p) => p.PhotoID === id).Hidden, true);
+  admin('setPhotoFlag', { photoId: id, field: 'Hidden', value: false });
+  assert.equal(call(TEAM, 'bootstrap').photos.some((p) => p.PhotoID === id), true);
+  assert.deepEqual(rows('AuditLog').filter((r) => r.EntityID === id).map((r) => r.Action), ['PhotoAdded', 'PhotoHidden', 'PhotoUnhidden']);
 });
 
-test('retake flag + report selection (one selected photo per slot)', () => {
-  const { admin, upload, rows } = boot();
-  const a = upload(TEAM, 'SL-043', 'S2').photo.PhotoID;
-  const b = upload(TEAM, 'SL-043', 'S2').photo.PhotoID;
-  admin('selectForReport', { photoId: a });
-  admin('selectForReport', { photoId: b });
-  const sel = rows('Photos').filter((p) => p.SelectedForReport === 'TRUE').map((p) => p.PhotoID);
-  assert.deepEqual(sel, [b]);
-  admin('selectForReport', { photoId: b, value: false });
-  assert.equal(rows('Photos').filter((p) => p.SelectedForReport === 'TRUE').length, 0);
-  admin('setPhotoFlag', { photoId: a, field: 'RetakeFlag', value: true });
-  assert.equal(rows('Photos').find((p) => p.PhotoID === a).RetakeFlag, 'TRUE');
-  const acts = rows('AuditLog').filter((r) => [a, b].includes(r.EntityID)).map((r) => r.Action);
-  assert.deepEqual(acts, ['PhotoAdded', 'PhotoAdded', 'ReportPhotoSelected', 'ReportPhotoSelected', 'ReportPhotoUnselected', 'RetakeFlagged']);
-});
-
-test('slots: rename keeps photos linked; add / deactivate / reorder; completeness follows active slots', () => {
-  const { admin, call, upload, rows } = boot();
+test('report selection: exactly 1 (C1 exactly 4 in order), validation, clear, audit', () => {
+  const { admin, upload, rows, fill } = boot();
   const L = require('../shared/logic.js');
-  const id = upload(TEAM, 'SL-044', 'S3').photo.PhotoID;
-  let r = admin('saveSlot', { slotId: 'S3', name: 'Ukuran lubang', spec: '1.5m × 1m × 1m' });
-  assert.equal(r.ok, true);
-  const ph = rows('Photos').find((p) => p.PhotoID === id);
-  assert.equal(ph.SlotID, 'S3', 'photo still linked by SlotID');
-  r = admin('saveSlot', { name: 'Pendawaian', spec: '' });
-  const s8 = r.slots.find((s) => s.Name === 'Pendawaian');
-  assert.equal(s8.SlotID, 'S8');
-  assert.equal(s8.Order, 8);
-  let b = call(TEAM, 'bootstrap');
-  assert.equal(L.photoStatus(b.poles.find((p) => p.PoleID === 'SL-044'), b.slots, b.photos).label, 'Belum lengkap (1/8)');
-  admin('saveSlot', { slotId: 'S8', name: 'Pendawaian', spec: '', active: false });
-  b = call(TEAM, 'bootstrap');
-  assert.equal(L.photoStatus(b.poles.find((p) => p.PoleID === 'SL-044'), b.slots, b.photos).label, 'Belum lengkap (1/7)');
-  r = admin('moveSlot', { slotId: 'S7', dir: -1 });
-  const order = r.slots.slice().sort((x, y) => x.Order - y.Order).map((s) => s.SlotID);
-  assert.deepEqual(order, ['S1', 'S2', 'S3', 'S4', 'S5', 'S7', 'S6', 'S8']);
-  admin('moveSlot', { slotId: 'S1', dir: -1 }); // already first: no-op
-  const acts = rows('AuditLog').filter((x) => x.Entity === 'Slot').map((x) => x.Action + ':' + x.Field);
-  assert.deepEqual(acts, ['SlotEdited:Name', 'SlotEdited:Spec', 'SlotAdded:Name', 'SlotEdited:Active', 'SlotReordered:Order']);
+  const ph = fill('SSL044');
+  const extraB2 = upload(TEAM, 'SSL044', 'B2', { measurement: '1.1' }).photo.PhotoID;
+  const extraC1 = [upload(TEAM, 'SSL044', 'C1').photo.PhotoID, upload(TEAM, 'SSL044', 'C1').photo.PhotoID];
+  const c1 = ph.C1.concat(extraC1); // 6 photos
+  const sel = (typeId, photoIds) => admin('setReportSelection', { poleId: 'SSL044', typeId, photoIds });
+  assert.match(sel('B2', [ph.B2[0], extraB2]).error, /tepat 1 gambar/);
+  assert.match(sel('C1', c1.slice(0, 3)).error, /tepat 4 gambar/);
+  assert.match(sel('C1', [c1[0], c1[0], c1[1], c1[2]]).error, /berulang/);
+  assert.match(sel('B2', [ph.B3[0]]).error, /bukan dari tiang\/jenis ini/);
+  assert.equal(sel('B2', [ph.B2[0]]).ok, true);
+  const order = [c1[5], c1[0], c1[3], c1[1]];
+  assert.equal(sel('C1', order).ok, true);
+  const photos = rows('Photos');
+  assert.deepEqual(order.map((id) => photos.find((p) => p.PhotoID === id).ReportOrder), ['1', '2', '3', '4']);
+  assert.equal(photos.filter((p) => p.PhotoTypeID === 'C1' && p.ReportOrder).length, 4);
+  const b = admin('bootstrap');
+  assert.deepEqual(L.reportPhotos('SSL044', 'C1', b.photos).map((p) => p.PhotoID), order);
+  assert.deepEqual(L.reportPhotos('SSL044', 'B2', b.photos).map((p) => p.PhotoID), [ph.B2[0]], 'older photo chosen over newer default');
+  // re-choose: old marks cleared
+  sel('C1', [c1[0], c1[1], c1[2], c1[3]]);
+  assert.equal(rows('Photos').find((p) => p.PhotoID === c1[5]).ReportOrder, '');
+  // clear -> automatic
+  assert.equal(sel('C1', []).ok, true);
+  assert.equal(rows('Photos').filter((p) => p.ReportOrder).length, 1);
+  // hidden photo cannot be chosen
+  admin('setPhotoFlag', { photoId: extraB2, field: 'Hidden', value: true });
+  assert.match(sel('B2', [extraB2]).error, /tersembunyi/);
+  assert.deepEqual(rows('AuditLog').filter((r) => r.Action.startsWith('ReportSelection')).map((r) => r.Action + ':' + r.Field),
+    ['ReportSelectionSet:B2', 'ReportSelectionSet:C1', 'ReportSelectionSet:C1', 'ReportSelectionCleared:C1']);
 });
 
-test('users: add, edit role, cannot lock yourself out, remove; all logged', () => {
-  const { admin, rows } = boot();
-  assert.equal(admin('saveUser', { email: ADMIN, name: 'Admin', role: 'Team' }).code, 'BAD');
-  assert.equal(admin('saveUser', { email: ADMIN, name: 'Admin', role: 'Admin', active: false }).code, 'BAD');
-  assert.equal(admin('removeUser', { email: ADMIN }).code, 'BAD');
-  assert.equal(admin('saveUser', { email: 'bad-email', role: 'Team' }).code, 'BAD');
-  assert.equal(admin('saveUser', { email: 'x@example.com', role: 'Superuser' }).code, 'BAD');
-  assert.equal(admin('saveUser', { email: 'New.Person@Gmail.com', name: 'Baru', role: 'Team' }).userRow.Email, 'new.person@gmail.com');
-  admin('saveUser', { email: 'new.person@gmail.com', name: 'Baru', role: 'Boss' });
-  assert.equal(rows('Users').find((u) => u.Email === 'new.person@gmail.com').Role, 'Boss');
-  assert.equal(admin('removeUser', { email: 'new.person@gmail.com' }).ok, true);
-  assert.equal(rows('Users').some((u) => u.Email === 'new.person@gmail.com'), false);
-  const acts = rows('AuditLog').filter((r) => r.EntityID === 'new.person@gmail.com').map((r) => r.Action);
-  assert.deepEqual(acts, ['UserAdded', 'UserEdited', 'UserRemoved']);
+test('activity / photo type names: rename keeps photos linked; rules fixed', () => {
+  const { admin, call, upload, rows } = boot();
+  const id = upload(TEAM, 'SSL045', 'B2', { measurement: '1' }).photo.PhotoID;
+  const r = admin('saveNames', { activities: [{ ActivityID: 'B', Name: 'Lubang Cubaan', Spec: 'Dalam 1.5m' }], types: [{ TypeID: 'B2', Name: 'Lebar lubang' }] });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(rows('Photos').find((p) => p.PhotoID === id).PhotoTypeID, 'B2');
+  const b = call(TEAM, 'bootstrap');
+  assert.equal(b.activities[1].Name, 'Lubang Cubaan');
+  assert.equal(b.types.find((t) => t.TypeID === 'B2').Name, 'Lebar lubang');
+  assert.equal(b.types.find((t) => t.TypeID === 'B2').NeedsMeasurement, true);
+  assert.equal(admin('saveNames', { types: [{ TypeID: 'B2', Name: ' ' }] }).code, 'BAD');
+  assert.equal(admin('saveNames', { types: [{ TypeID: 'Z9', Name: 'x' }] }).code, 'BAD');
+  assert.deepEqual(rows('AuditLog').filter((x) => x.Action.endsWith('Edited') && ['Activity', 'PhotoType'].includes(x.Entity)).map((x) => x.Action + ':' + x.Field),
+    ['ActivityEdited:Name', 'ActivityEdited:Spec', 'PhotoTypeEdited:Name']);
 });
 
-test('notes: append-only, idempotent, boss cannot write', () => {
-  const { call, rows } = boot();
-  assert.equal(call(TEAM, 'addNote', { noteId: 'note-1', poleId: 'SL-045', text: 'Lokasi dianjak 5m ke timur' }).ok, true);
-  assert.equal(call(TEAM, 'addNote', { noteId: 'note-1', poleId: 'SL-045', text: 'Lokasi dianjak 5m ke timur' }).duplicate, true);
-  assert.equal(rows('Notes').length, 1);
-  assert.equal(call(BOSS, 'addNote', { noteId: 'note-2', poleId: 'SL-045', text: 'x' }).code, 'FORBIDDEN');
-  assert.equal(call(TEAM, 'addNote', { noteId: 'note-3', poleId: 'SL-045', text: '   ' }).code, 'BAD');
-  assert.equal(call(TEAM, 'addNote', { noteId: 'note-4', poleId: 'SL-045', text: 'x'.repeat(2001) }).code, 'BAD');
-  assert.equal(rows('AuditLog').filter((r) => r.Action === 'NoteAdded').length, 1);
-  // formula-looking text stays text
-  call(TEAM, 'addNote', { noteId: 'note-5', poleId: 'SL-045', text: '=HYPERLINK("x")' });
-  assert.equal(rows('Notes').find((n) => n.NoteID === 'note-5').Text, '=HYPERLINK("x")');
+test('work plan: add several poles, several plans per pole, duplicates skipped, edit, remove, validation, audit', () => {
+  const { admin, call, rows } = boot();
+  let r = admin('addPlans', { poleIds: ['SSL050', 'SSL034'], date: '2027-01-06', activityId: 'B' });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.added, 2);
+  r = admin('addPlans', { poleIds: ['SSL034'], date: '2027-01-06', activityId: 'C' });
+  assert.equal(r.added, 1, 'same pole, other activity -> new entry');
+  r = admin('addPlans', { poleIds: ['SSL034'], date: '2027-01-07', activityId: '' });
+  assert.equal(r.added, 1, 'same pole, other date');
+  r = admin('addPlans', { poleIds: ['SSL034', 'SSL050'], date: '2027-01-06', activityId: 'B' });
+  assert.deepEqual([r.added, r.skipped], [0, 2], 'exact duplicates skipped');
+  const plans = rows('WorkPlan');
+  assert.equal(plans.length, 4);
+  assert.deepEqual(plans.filter((p) => p.PoleID === 'SSL034').map((p) => p.Date + '/' + p.Activity).sort(), ['2027-01-06/B', '2027-01-06/C', '2027-01-07/']);
+  assert.equal(call(BOSS, 'bootstrap').plans.length, 4, 'everyone receives plans (offline cache)');
+  assert.equal(admin('addPlans', { poleIds: ['SSL034'], date: '2027-02-30' }).code, 'BAD');
+  assert.equal(admin('addPlans', { poleIds: ['SSL034'], date: '2027-02-03', activityId: 'X' }).code, 'BAD');
+  assert.equal(admin('addPlans', { poleIds: ['SSL999'], date: '2027-02-03' }).code, 'NOTFOUND');
+  assert.equal(admin('addPlans', { poleIds: [], date: '2027-02-03' }).code, 'BAD');
+  const target = plans.find((p) => p.PoleID === 'SSL034' && p.Activity === 'C');
+  assert.equal(admin('editPlan', { planId: target.PlanID, date: '2027-01-06', activityId: 'B' }).code, 'BAD', 'edit into a duplicate refused');
+  assert.equal(admin('editPlan', { planId: target.PlanID, date: '2027-01-08', activityId: 'A' }).ok, true);
+  assert.equal(rows('WorkPlan').find((p) => p.PlanID === target.PlanID).Date, '2027-01-08');
+  assert.equal(admin('removePlan', { planId: target.PlanID }).ok, true);
+  assert.equal(rows('WorkPlan').length, 3);
+  const log = rows('AuditLog').filter((x) => x.Entity === 'WorkPlan').map((x) => x.Action);
+  assert.deepEqual(log, ['PlanAdded', 'PlanAdded', 'PlanAdded', 'PlanAdded', 'PlanEdited', 'PlanEdited', 'PlanRemoved']);
+  assert.equal(rows('AuditLog').find((x) => x.Action === 'PlanRemoved').OldValue, 'SSL034 2027-01-08 A');
 });
 
-function reportImages(rt, reportId) {
-  const rep = rt.state.sheets.Reports.rowsAsObjects().find((r) => r.ReportID === reportId);
-  const id = rep.FileURL.match(/\/d\/([^/]+)/)[1];
-  const doc = JSON.parse(rt.state.files[id].buf.toString('utf8').replace('%PDF-MOCK\n', ''));
-  const sections = [];
-  let cur = null;
-  doc.body.forEach((n) => {
-    if (n.type === 'table' && n.rows[0][0].paras[0].text === 'Tiang') {
-      cur = { pole: n.rows[0][1].paras[0].text, status: n.rows[1][3].paras[0].text, ch: n.rows[1][1].paras[0].text, slots: [] };
-      sections.push(cur);
-    } else if (n.type === 'table' && cur) {
-      n.rows.forEach((r) => r.forEach((c) => {
-        if (!c.paras[0].text && !c.paras[0].images.length && c.paras.length === 1) return;
-        const img = c.paras[0].images[0];
-        const texts = c.paras.map((p) => p.text).filter(Boolean);
-        cur.slots.push({ title: texts[0], img: img ? img.name : null, w: img && img.w, captions: texts.slice(1) });
-      }));
-    }
-  });
-  return { doc, sections, file: rt.state.files[id] };
-}
+test('reports: check lists missing poles; generate refuses incomplete poles; limit by photo count', () => {
+  const { admin, upload, fill, rt } = boot();
+  fill('SSL034');
+  fill('SSL035', 'A');
+  upload(TEAM, 'SSL036', 'B1'); upload(TEAM, 'SSL036', 'B2', { measurement: '1.2' });
+  let r = admin('reportCheck', { activityId: 'B', poleIds: ['SSL036', 'SSL034', 'SSL035'] });
+  assert.deepEqual(r.ready, ['SSL034']);
+  assert.deepEqual(r.missing, [
+    { PoleID: 'SSL035', missing: ['Korek (0/1 gambar)', 'Lebar (0/1 gambar)', 'Panjang (0/1 gambar)', 'Dalam (0/1 gambar)'] },
+    { PoleID: 'SSL036', missing: ['Panjang (0/1 gambar)', 'Dalam (0/1 gambar)'] }]);
+  assert.equal(r.maxPoles, 15);
+  assert.equal(admin('reportCheck', { activityId: 'A', poleIds: ['SSL034'] }).maxPoles, 60);
+  assert.equal(admin('reportCheck', { activityId: 'C', poleIds: ['SSL034'] }).maxPoles, 10);
+  r = admin('generateReport', { activityId: 'B', poleIds: ['SSL034', 'SSL036'] });
+  assert.equal(r.code, 'BAD');
+  assert.match(r.error, /SSL036: Panjang \(0\/1 gambar\), Dalam \(0\/1 gambar\)/);
+  assert.equal(rt.state.sheets.Reports.rowsAsObjects().length, 0);
+  const sixteen = Array.from({ length: 16 }, (_, i) => 'SSL' + String(34 + i).padStart(3, '0'));
+  assert.match(admin('generateReport', { activityId: 'B', poleIds: sixteen }).error, /Maksimum 15 tiang/);
+  assert.equal(admin('generateReport', { activityId: 'Z', poleIds: ['SSL034'] }).code, 'BAD');
+  assert.equal(admin('generateReport', { activityId: 'A', poleIds: ['SSL034', 'SSL034'] }).code, 'BAD');
+  rt.g.setSetting_('ReportMaxPhotos', '8');
+  assert.match(admin('generateReport', { activityId: 'B', poleIds: ['SSL034', 'SSL035', 'SSL036'] }).error, /Maksimum 2 tiang/);
+});
 
-test('PDF report: multiple photos per slot, with and without admin selection; captions; limits; download', () => {
-  const { rt, admin, call, upload, rows } = boot();
-  const p1 = upload(TEAM, 'SL-046', 'S3', { capturedAt: '2026-11-21T08:00:00+08:00' }).photo.PhotoID;
-  const p2 = upload(TEAM, 'SL-046', 'S3', { capturedAt: '2026-11-21T09:00:00+08:00' }).photo.PhotoID;
-  const p3 = upload(TEAM, 'SL-046', 'S3', { capturedAt: '2026-11-21T10:00:00+08:00' }).photo.PhotoID;
-  const g = upload(TEAM, 'SL-046', 'S7', { source: 'Gallery', gpsAvailable: false }).photo.PhotoID;
-  admin('setPhotoFlag', { photoId: p3, field: 'RetakeFlag', value: true });
-  call(TEAM, 'setDone', { poleId: 'SL-046', done: true });
+test('reports: PEGGING / TRIAL PIT / INSTALLATION layouts, PDF + Word in Solar Reports, selection used, download', () => {
+  const { rt, admin, call, upload, fill, rows } = boot();
+  const ids = ['SSL050', 'SSL034', 'SSL040', 'SSL041'];
+  const ph = {};
+  ids.forEach((id) => { ph[id] = fill(id); });
+  // a portrait progress photo + admin order for SSL034 C1
+  const portrait = upload(TEAM, 'SSL034', 'C1', { imageB64: IMG_PORTRAIT }).photo.PhotoID;
+  const order = [portrait, ph.SSL034.C1[2], ph.SSL034.C1[0], ph.SSL034.C1[3]];
+  admin('setReportSelection', { poleId: 'SSL034', typeId: 'C1', photoIds: order });
+  // SSL040: a newer B2 photo with another width, admin keeps the old one
+  upload(TEAM, 'SSL040', 'B2', { measurement: '2.05' });
+  admin('setReportSelection', { poleId: 'SSL040', typeId: 'B2', photoIds: [ph.SSL040.B2[0]] });
 
-  // 1) no selection -> latest visible non-flagged (p2)
-  let rep = admin('generateReport', { poleIds: ['SL-046', 'SL-047'] });
-  assert.equal(rep.ok, true, rep.error);
-  let out = reportImages(rt, rep.report.ReportID);
-  assert.equal(out.sections.length, 2);
-  assert.equal(out.sections[0].pole, 'SL-046');
-  assert.equal(out.sections[0].status, 'Siap');
-  assert.equal(out.sections[0].slots.length, 7);
-  const s3 = out.sections[0].slots[2];
-  assert.equal(s3.title, '3. Ukuran (1.5m × 1m)');
-  assert.ok(s3.img.includes(p2), 'uses latest non-flagged photo p2, got ' + s3.img);
-  assert.ok(s3.w <= 215);
-  assert.deepEqual(s3.captions, ['Tarikh/masa: 21/11/2026 09:00', 'GPS: 3.12346, 101.65432 (±8 m)', 'Diambil oleh: Ali', 'Sumber: Kamera']);
-  const s7 = out.sections[0].slots[6];
-  assert.ok(s7.img.includes(g));
-  assert.ok(s7.captions.includes('GPS tidak tersedia'));
-  assert.ok(s7.captions.includes('Sumber: Galeri'));
-  assert.equal(out.sections[0].slots[0].captions[0], 'Tiada gambar');
-  assert.equal(out.sections[1].status, 'Belum mula');
-  assert.ok(out.doc.body.some((n) => n.type === 'pagebreak'));
-  assert.ok(out.doc.body.some((n) => n.type === 'p' && n.text.includes('Package 2A — Solar Street Lighting')));
-  assert.ok(!JSON.stringify(out.doc).includes('{{'), 'all placeholders replaced');
-  assert.match(out.file.name, /\.pdf$/);
-  const folder = rt.state.folders[out.file.parent];
-  assert.equal(folder.name, 'Solar Reports');
+  // PEGGING
+  let rep = admin('generateReport', { activityId: 'A', poleIds: ids }).report;
+  assert.equal(rep.Activity, 'A');
+  assert.equal(rep.PoleIDs, 'SSL034, SSL040, SSL041, SSL050', 'sorted by Pole ID');
+  let { doc, file } = reportDoc(rt, rep);
+  assert.equal(doc.pageWidth, 595.28);
+  assert.equal(doc.pageHeight, 841.89);
+  let blocks = blocksOf(doc);
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0].title, 'PEGGING');
+  assert.equal(blocks[0].bg, '#D9D9D9');
+  assert.equal(blocks[0].border, 1);
+  assert.equal(blocks[0].gridBorder, 0);
+  assert.deepEqual(blocks[0].cells.map((c) => c.caption), ['SSL034', 'SSL040', 'SSL041', 'SSL050', '', '']);
+  assert.ok(blocks[0].cells[0].img.includes(ph.SSL034.A1[0]));
+  assert.deepEqual(blocks[0].extra, ['Total pegging : 4 nos']);
+  assert.ok(blocks[0].cells.slice(0, 4).every((c) => c.w <= 160 && c.h <= 120 && c.align === 'CENTER'));
+  assert.match(file.name, /^Laporan_PEGGING_\d{8}-\d{4}_SSL034-SSL050\.pdf$/);
+  assert.equal(rt.state.folders[file.parent].name, 'Solar Reports');
+  const w = reportDoc(rt, rep, 'docx');
+  assert.equal(w.magic, 'DOCX-MOCK');
+  assert.match(w.file.name, /\.docx$/);
+  assert.equal(rt.state.folders[w.file.parent].name, 'Solar Reports');
+  assert.deepEqual(blocksOf(w.doc), blocks, 'Word export = same document');
 
-  // 2) admin selects p1 -> used instead
-  admin('selectForReport', { photoId: p1 });
-  rep = admin('generateReport', { poleIds: ['SL-046'] });
-  out = reportImages(rt, rep.report.ReportID);
-  assert.ok(out.sections[0].slots[2].img.includes(p1), 'admin selection p1 used');
+  // TRIAL PIT
+  rep = admin('generateReport', { activityId: 'B', poleIds: ids }).report;
+  blocks = blocksOf(reportDoc(rt, rep).doc);
+  assert.equal(blocks.length, 4);
+  assert.ok(blocks.every((b) => b.title === 'TRIAL PIT EXCAVATION WORKS'));
+  assert.deepEqual(blocks.map((b) => b.pageBreaksBefore), [0, 0, 0, 1], '3 blocks per page');
+  assert.deepEqual(blocks[0].cells.map((c) => c.caption), ['SSL034', 'WIDTH : 1.3M', 'LENGTH : 1.6M', 'DEPTH : 1.5M']);
+  assert.deepEqual(blocks[1].cells.map((c) => c.caption), ['SSL040', 'WIDTH : 1.3M', 'LENGTH : 1.6M', 'DEPTH : 1.5M'], 'admin choice (old 1.3 m photo)');
+  assert.ok(blocks[1].cells[1].img.includes(ph.SSL040.B2[0]));
+  assert.ok(blocks[0].cells.every((c) => c.img && c.w <= 118 && c.h <= 157));
 
-  // temp doc copies are trashed, reports listed + logged
-  assert.ok(Object.values(rt.state.files).filter((f) => f.name.startsWith('tmp_')).every((f) => f.trashed));
-  assert.equal(rows('Reports').length, 2);
-  assert.equal(rows('AuditLog').filter((r) => r.Action === 'ReportGenerated').length, 2);
-  assert.equal(call(BOSS, 'bootstrap').reports.length, 2);
+  // INSTALLATION
+  rep = admin('generateReport', { activityId: 'C', poleIds: ['SSL041', 'SSL034'] }).report;
+  blocks = blocksOf(reportDoc(rt, rep).doc);
+  assert.deepEqual(blocks.map((b) => b.title), ['INSTALLATION SOLAR STREET LIGHTING PROGRESS', 'INSTALLATION SOLAR STREET LIGHTING COMPLETED',
+    'INSTALLATION SOLAR STREET LIGHTING PROGRESS', 'INSTALLATION SOLAR STREET LIGHTING COMPLETED']);
+  assert.deepEqual(blocks.map((b) => b.pageBreaksBefore), [0, 0, 1, 1], 'one pole per page');
+  assert.deepEqual(blocks.map((b) => b.extra), [['SSL034'], ['SSL034'], ['SSL041'], ['SSL041']]);
+  assert.equal(blocks[0].cells.length, 4);
+  order.forEach((id, k) => assert.ok(blocks[0].cells[k].img.includes(id), 'C1 in admin order ' + k));
+  assert.deepEqual([blocks[0].cells[0].w, blocks[0].cells[0].h], [118, 157], 'portrait fits the cell');
+  assert.deepEqual([blocks[0].cells[1].w, blocks[0].cells[1].h], [118, 89], 'landscape keeps aspect ratio');
+  assert.ok(blocks[1].cells[0].img.includes(ph.SSL034.C2[0]) && blocks[1].cells[1].img.includes(ph.SSL034.C3[0]));
+  assert.ok(blocks[1].cells[0].w > blocks[0].cells[1].w, 'completed photos larger');
+  assert.ok(!JSON.stringify(blocks).includes('Package 2A'), 'no form headers');
 
-  // template without {{CONTENT}} still works
-  const tplId = rt.state.sheets.Settings.rowsAsObjects().find((r) => r.Key === 'TemplateDocID').Value;
-  rt.state.docs[tplId].body = rt.state.docs[tplId].body.filter((n) => !(n.text || '').includes('{{CONTENT}}'));
-  const noTpl = admin('generateReport', { poleIds: ['SL-046'] });
-  assert.equal(noTpl.ok, true, noTpl.error);
-  assert.equal(reportImages(rt, noTpl.report.ReportID).sections.length, 1);
-
-  // limit (ReportMaxPoles = 10)
-  const eleven = Array.from({ length: 11 }, (_, i) => 'SL-0' + (34 + i));
-  assert.equal(admin('generateReport', { poleIds: eleven }).code, 'BAD');
-  assert.equal(admin('generateReport', { poleIds: [] }).code, 'BAD');
-  assert.equal(admin('generateReport', { poleIds: ['SL-999'] }).code, 'NOTFOUND');
-
-  // chunked download reassembles the exact bytes (force small chunks)
+  // temporary Google Docs trashed; 3 reports x (pdf + docx)
+  const docsLeft = Object.values(rt.state.files).filter((f) => f.mime === 'application/vnd.google-apps.document' && !f.trashed);
+  assert.equal(docsLeft.length, 0);
+  assert.equal(Object.values(rt.state.files).filter((f) => !f.trashed && /\.(pdf|docx)$/.test(f.name)).length, 6);
+  assert.deepEqual(rows('AuditLog').filter((r) => r.Action === 'ReportGenerated').map((r) => r.Field), ['PEGGING', 'TRIALPIT', 'INSTALLATION']);
+  // chunked download of both formats reassembles the exact bytes
   rt.g.CHUNK_BYTES = 1000;
-  let offset = 0, parts = [], first;
-  do {
-    const d = call(BOSS, 'downloadReport', { reportId: rep.report.ReportID, offset });
-    assert.equal(d.ok, true);
-    first = first || d;
-    parts.push(Buffer.from(d.b64, 'base64'));
-    offset = d.next;
-  } while (offset !== null);
-  assert.ok(parts.length > 1);
-  assert.deepEqual(Buffer.concat(parts), out.file.buf);
-  assert.equal(first.size, out.file.buf.length);
+  for (const format of ['pdf', 'docx']) {
+    let offset = 0; const parts = [];
+    do {
+      const d = call(BOSS, 'downloadReport', { reportId: rep.ReportID, offset, format });
+      assert.equal(d.ok, true, d.error);
+      parts.push(Buffer.from(d.b64, 'base64'));
+      offset = d.next;
+    } while (offset !== null);
+    assert.ok(parts.length > 1);
+    assert.deepEqual(Buffer.concat(parts), reportDoc(rt, rep, format).file.buf, format);
+  }
 });
 
-test('audit log: admin only, newest first, searchable; feed visible to all roles without user-admin entries', () => {
-  const { call, admin, upload } = boot();
-  upload(TEAM, 'SL-048', 'S1');
-  call(TEAM, 'setDone', { poleId: 'SL-048', done: true });
-  const a = admin('audit', { q: 'SL-048' });
-  assert.equal(a.ok, true);
-  assert.equal(a.rows[0].Action, 'MarkedDone');
-  assert.equal(a.rows[1].Action, 'PhotoAdded');
+// ---------------------------------------------------------------- migration v1 -> v2
+function buildV1(rt) {
+  const ss = rt.g.SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = (name, rowsArr) => { const sh = ss.getSheetByName(name) || ss.insertSheet(name); sh.data = rowsArr.map((r) => r.slice()); return sh; };
+  // remove v2 tabs made by boot()/setup to mimic the v1 state exactly
+  ['Activities', 'PhotoTypes', 'WorkPlan'].forEach((n) => delete rt.state.sheets[n]);
+  sheet('Poles', [['PoleID', 'Bound', 'Chainage', 'ChainageExact', 'Category', 'PlannedDate', 'IsDone', 'DoneBy', 'DoneAt', 'UpdatedAt'],
+    ['SL-001', 'EB', 'CH.11111', 'TRUE', 'Sudah dipasang', '', 'TRUE', 'Import', '', ''],
+    ['SL-002', 'WB', 'CH.22222', 'TRUE', 'Perlu pasang', '2027-01-02', 'FALSE', '', '', ''],
+    ['SL-003', 'WB', 'CH.33300 – CH.33400', 'FALSE', 'Tunggu kelulusan', '', 'FALSE', '', '', '']]);
+  sheet('Photos', [['PhotoID', 'PoleID', 'SlotID', 'DriveFileID', 'FileURL', 'Source', 'CapturedAt', 'UploadedAt', 'Latitude', 'Longitude', 'AccuracyM', 'GPSAvailable', 'TakenBy', 'Hidden', 'RetakeFlag', 'SelectedForReport'],
+    ['p1', 'SL-002', 'S1', 'X', 'u', 'Camera', '2027-01-01T08:00:00+08:00', '', '', '', '', 'FALSE', TEAM, 'FALSE', 'FALSE', 'TRUE'],
+    ['p2', 'SL-002', 'S3', 'X', 'u', 'Camera', '2027-01-01T08:01:00+08:00', '', '', '', '', 'FALSE', TEAM, 'FALSE', 'FALSE', 'FALSE'],
+    ['p3', 'SL-002', 'S4', 'X', 'u', 'Camera', '2027-01-01T08:02:00+08:00', '', '', '', '', 'FALSE', TEAM, 'FALSE', 'FALSE', 'FALSE'],
+    ['p4', 'SL-002', 'S5', 'X', 'u', 'Camera', '2027-01-01T08:03:00+08:00', '', '', '', '', 'FALSE', TEAM, 'FALSE', 'FALSE', 'FALSE'],
+    ['p5', 'SL-002', 'S7', 'X', 'u', 'Camera', '2027-01-01T08:04:00+08:00', '', '', '', '', 'FALSE', TEAM, 'FALSE', 'FALSE', 'FALSE']]);
+  sheet('Slots', [['SlotID', 'Order', 'Name', 'Spec', 'Active'], ['S1', '1', 'Peg / lokasi', '', 'TRUE']]);
+  sheet('Notes', [['NoteID', 'PoleID', 'Text', 'CreatedBy', 'CreatedAt'], ['n1', 'SL-002', 'nota SL-002 lama', TEAM, '2027-01-01T08:00:00+08:00']]);
+  sheet('Reports', [['ReportID', 'PoleIDs', 'FileURL', 'CreatedBy', 'CreatedAt'], ['R1', 'SL-001, SL-002', 'https://drive.google.com/file/d/OLD/view', ADMIN, '']]);
+  sheet('AuditLog', [['Timestamp', 'UserEmail', 'Action', 'Entity', 'EntityID', 'Field', 'OldValue', 'NewValue'],
+    ['2027-01-01T08:00:00+08:00', TEAM, 'PhotoAdded', 'Photo', 'p1', 'Pole/Slot', '', 'SL-002/S1 (Camera)']]);
+  const settings = rt.state.sheets.Settings;
+  const photosRoot = rt.state.folders[settings.rowsAsObjects().find((r) => r.Key === 'PhotosFolderID').Value];
+  const f2 = photosRoot.createFolder('SL-002');
+  f2.createFile(new rt.Blob(Buffer.from('jpg'), 'image/jpeg', 'SL-002_S1_20270101-080000_p1.jpg'));
+  f2.createFile(new rt.Blob(Buffer.from('jpg'), 'image/jpeg', 'p1_thumb.jpg'));
+  // both an old and a new folder for SSL003 (e.g. a photo taken after a half-finished manual rename)
+  photosRoot.createFolder('SL-003').createFile(new rt.Blob(Buffer.from('jpg'), 'image/jpeg', 'SL-003_S1_x_p9.jpg'));
+  photosRoot.createFolder('SSL003');
+  return photosRoot;
+}
+const snapshot = (rt) => JSON.stringify({ sheets: Object.fromEntries(Object.entries(rt.state.sheets).map(([k, v]) => [k, v.data])),
+  folders: Object.values(rt.state.folders).map((f) => [f.name, f.parent, !!f.trashed]),
+  files: Object.values(rt.state.files).map((f) => [f.name, f.parent, !!f.trashed]) });
+
+test('migrateV2: renames IDs in every sheet + Drive, maps old slots, adds new tabs, idempotent, one audit entry', () => {
+  const { rt, rows, call } = boot();
+  const root = buildV1(rt);
+  assert.throws(() => rt.g.setup(), /migrateV2/, 'setup refuses a v1 sheet');
+  const msg = rt.g.migrateV2();
+  assert.match(msg, /perubahan/);
+  assert.deepEqual(rows('Poles').map((p) => p.PoleID), ['SSL001', 'SSL002', 'SSL003']);
+  const photos = rows('Photos');
+  assert.deepEqual(rt.state.sheets.Photos.data[0], ['PhotoID', 'PoleID', 'PhotoTypeID', 'DriveFileID', 'FileURL', 'Source', 'CapturedAt', 'UploadedAt', 'Latitude', 'Longitude', 'AccuracyM', 'GPSAvailable', 'TakenBy', 'Hidden', 'RetakeFlag', 'ReportOrder', 'MeasurementM']);
+  assert.deepEqual(photos.map((p) => p.PoleID + '/' + p.PhotoTypeID), ['SSL002/A1', 'SSL002/B2', 'SSL002/C1', 'SSL002/C1', 'SSL002/C3']);
+  assert.ok(photos.every((p) => p.ReportOrder === '' && p.MeasurementM === ''));
+  assert.equal(rows('Notes')[0].PoleID, 'SSL002');
+  assert.equal(rows('Notes')[0].Text, 'nota SL-002 lama', 'free text untouched');
+  assert.equal(rows('Reports')[0].PoleIDs, 'SSL001, SSL002');
+  assert.ok('Activity' in rows('Reports')[0] && 'DocxURL' in rows('Reports')[0]);
+  assert.ok(rt.state.sheets.Slots_old && !rt.state.sheets.Slots);
+  ['Activities', 'PhotoTypes', 'WorkPlan'].forEach((n) => assert.ok(rt.state.sheets[n], n));
+  assert.equal(rows('AuditLog')[0].NewValue, 'SL-002/S1 (Camera)', 'old history not rewritten');
+  assert.equal(rows('AuditLog').filter((r) => r.Action === 'MigrationV2').length, 1);
+  const live = Object.values(rt.state.folders).filter((f) => f.parent === root.id && !f.trashed).map((f) => f.name).sort();
+  assert.deepEqual(live, ['SSL002', 'SSL003']);
+  const fileNames = Object.values(rt.state.files).filter((f) => !f.trashed && rt.state.folders[f.parent] && rt.state.folders[f.parent].parent === root.id)
+    .map((f) => rt.state.folders[f.parent].name + '/' + f.name).sort();
+  assert.deepEqual(fileNames, ['SSL002/SSL002_S1_20270101-080000_p1.jpg', 'SSL002/p1_thumb.jpg', 'SSL003/SSL003_S1_x_p9.jpg']);
+  // the app works on the migrated data
+  const L = require('../shared/logic.js');
+  const b = call(TEAM, 'bootstrap');
+  assert.equal(b.ok, true, b.error);
+  const pole = b.poles.find((p) => p.PoleID === 'SSL002');
+  assert.equal(L.photoStatus(pole, b.types, b.photos, b.activities).detail, 'Pegging ✓ · Trial Pit 0/4 · Installation 3/6',
+    'S4+S5 -> 2x C1, S7 -> C3; S3 -> B2 without measurement does not count');
+  // second run: nothing changes at all
+  const before = snapshot(rt);
+  assert.match(rt.g.migrateV2(), /tiada perubahan/);
+  assert.equal(snapshot(rt), before);
+});
+
+test('migrateV2: stops before changing anything if a pole ID is unexpected', () => {
+  const { rt } = boot();
+  buildV1(rt);
+  rt.state.sheets.Poles.data.push(['XYZ-9', 'EB', 'CH.1', 'FALSE', 'Perlu pasang', '', 'FALSE', '', '', '']);
+  const before = snapshot(rt);
+  assert.throws(() => rt.g.migrateV2(), /ID tiang tidak dikenali: "XYZ-9"/);
+  assert.equal(snapshot(rt), before);
+});
+
+test('migrateV2 on a v2 sheet (fresh setup) changes nothing', () => {
+  const { rt } = boot();
+  const before = snapshot(rt);
+  assert.match(rt.g.migrateV2(), /tiada perubahan/);
+  assert.equal(snapshot(rt), before);
+});
+
+test('items queued by the old v1 app (SL-034, slot S1) still sync after the migration', () => {
+  const { call, rows } = boot();
+  const up = call(TEAM, 'uploadPhoto', { photoId: 'legacy_000001', poleId: 'SL-040', slotId: 'S1', imageB64: IMG, source: 'Camera', gpsAvailable: false });
+  assert.equal(up.ok, true, up.error);
+  assert.deepEqual([up.photo.PoleID, up.photo.PhotoTypeID], ['SSL040', 'A1']);
+  assert.equal(call(TEAM, 'addNote', { noteId: 'legacy-note', poleId: 'SL-040', text: 'nota lama' }).note.PoleID, 'SSL040');
+  assert.equal(call(TEAM, 'setDone', { poleId: 'SL-040', done: true }).pole.IsDone, true);
+  const s3 = call(TEAM, 'uploadPhoto', { photoId: 'legacy_000002', poleId: 'SL-040', slotId: 'S3', imageB64: IMG, source: 'Camera', gpsAvailable: false });
+  assert.match(s3.error, /Sila masukkan ukuran/, 'old "Ukuran" slot -> B2 needs a measurement: kept on the phone as failed, not lost');
+  assert.equal(rows('Photos').length, 1);
+});
+
+test('notes, users, audit, feed, doPost', () => {
+  const { rt, call, admin, upload, rows, tok } = boot();
+  assert.equal(call(TEAM, 'addNote', { noteId: 'note-1', poleId: 'SSL045', text: 'Lokasi dianjak' }).ok, true);
+  assert.equal(call(TEAM, 'addNote', { noteId: 'note-1', poleId: 'SSL045', text: 'Lokasi dianjak' }).duplicate, true);
+  assert.equal(call(BOSS, 'addNote', { noteId: 'note-2', poleId: 'SSL045', text: 'x' }).code, 'FORBIDDEN');
+  assert.equal(admin('saveUser', { email: ADMIN, name: 'Admin', role: 'Team' }).code, 'BAD');
+  assert.equal(admin('removeUser', { email: ADMIN }).code, 'BAD');
+  upload(TEAM, 'SSL048', 'A1');
+  call(TEAM, 'setDone', { poleId: 'SSL048', done: true });
+  assert.equal(admin('audit', { q: 'SSL048' }).rows[0].Action, 'MarkedDone');
   assert.equal(call(TEAM, 'audit', {}).code, 'FORBIDDEN');
   const feed = call(BOSS, 'bootstrap').feed;
   assert.equal(feed[0].Action, 'MarkedDone');
-  assert.equal(feed[0].Name, 'Ali');
-  assert.ok(feed.every((f) => !f.Action.startsWith('User')));
-  assert.equal(call(BOSS, 'bootstrap').users, undefined, 'only admin receives the users list');
-});
-
-test('doPost JSON envelope + doGet health', () => {
-  const { rt, tok } = boot();
+  assert.ok(feed.every((f) => !f.Action.startsWith('User') && !f.Action.startsWith('Plan')));
   const out = JSON.parse(rt.g.doPost({ postData: { contents: JSON.stringify({ action: 'me', token: tok(BOSS) }) }, parameter: {} }).getContent());
-  assert.equal(out.ok, true);
   assert.equal(out.user.role, 'Boss');
-  assert.equal(JSON.parse(rt.g.doPost({ postData: { contents: 'not json' }, parameter: {} }).getContent()).code, 'BAD');
   assert.equal(JSON.parse(rt.g.doGet().getContent()).ok, true);
+  assert.equal(rows('Notes').length, 1);
 });

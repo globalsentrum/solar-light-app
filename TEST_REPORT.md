@@ -1,78 +1,88 @@
-# Laporan Ujian — Aplikasi Lampu Solar Karak
+# Laporan Ujian — Aplikasi Lampu Solar Karak (versi 2)
 
-Tarikh: 22/11/2026 · Keputusan: **38 / 38 lulus** (28 unit + backend, 10 pelayar)
-Cara jalankan semula: `npm install` → letak xlsx dalam `data/` → `npm run import` → `npm run test:all`
-
-## Apa yang diuji, dan bagaimana
+Tarikh: 23/11/2026 · Keputusan: **47 / 47 lulus** (33 unit + backend, 14 pelayar)
+Jalankan semula: `npm install` → `npm run test:all`. Ujian guna **data tiang dummy** (`tests/fixtures/dummy-data.js`:
+123 tiang, jumlah sama, chainage rekaan), jadi ia boleh dijalankan dari repo sahaja. Semakan bilangan pada xlsx
+sebenar dijalankan hanya jika fail peribadi itu ada (`data/`). Satu ujian memastikan tiada chainage sebenar dalam fail ujian.
 
 | Bahagian | Cara ujian |
 |---|---|
-| Logik status, kelengkapan, CH tepat, kebenaran | Ujian unit Node (`tests/logic.test.js`) |
-| Backend Apps Script | Kod **sebenar** `Code.gs` + `Logic.gs` + `SeedData.gs`, dijalankan dengan tiruan (mock) Google Sheets/Drive/Docs (`tests/gas-mock.js`, `tests/backend.test.js`) |
-| Aplikasi telefon (PWA) | Chromium (Playwright 1.63), skrin 390×844 (saiz telefon), disambung ke backend sebenar di atas mock (`tests/e2e.test.js`) |
+| Logik (status, ukuran, pilihan laporan, tarikh Malaysia, ID) | Ujian unit Node — `tests/logic.test.js` |
+| Backend Apps Script | Kod **sebenar** `Code.gs` + `Logic.gs` dengan tiruan Google Sheets/Drive/Docs yang **ketat** (kaedah Docs yang tidak dikenali = ralat; `setText()` pulangkan kosong seperti Google) — `tests/backend.test.js` |
+| Aplikasi telefon | Chromium (Playwright), skrin 390×844, jam dikawal untuk ujian tarikh — `tests/e2e.test.js` |
+| Susun atur laporan | Pratonton PDF + Word dari definisi susun atur yang sama — `npm run preview` |
 
-⚠️ **Tidak dapat diuji di sini** (perlu anda uji selepas setup, lihat senarai semak di bawah):
-log masuk Google sebenar, Google Sheets/Drive/Docs sebenar (termasuk PDF sebenar), iPhone Safari dan Android Chrome sebenar, kamera & GPS sebenar.
+⚠️ **Tidak dapat diuji di sini:** Google Docs/Drive/Sheets sebenar (termasuk eksport Word sebenar), log masuk Google,
+telefon sebenar. Pratonton laporan dibuat dengan LibreOffice; laporan sebenar dibuat oleh Google Docs (fon/jarak mungkin
+berbeza sedikit). Sila jana satu laporan sebenar bagi setiap aktiviti selepas deploy.
 
-## 1. Ujian unit (12 lulus)
-- Salinan `logic.js` untuk frontend & Apps Script adalah sama.
-- **CH tepat**: `CH.40045` ✔; julat `CH.42400 – CH.42600`, 4/6 digit, huruf kecil, tanpa titik ✘.
-- **Jumlah import dari xlsx**: 123 = 33 + 44 + 46; EB 54 / WB 69; SL-056…060 kekal *Perlu pasang* dengan "CH belum tepat"; 51 CH belum tepat; lajur Zone diabaikan.
-- **Status kerja**: Sudah dipasang → Siap; Tunggu kelulusan; Belum mula; gambar tersembunyi tidak dikira; gambar "Ambil semula" masih dikira *Dalam proses*; Siap; Batal siap kembali ke Dalam proses / Belum mula.
-- **Status gambar**: Lengkap / Belum lengkap (x/7); sembunyi & Ambil semula → 6/7; gambar baru selepas Ambil semula → Lengkap; Siap dengan 6/7 (berasingan).
-- **Slot tidak aktif**: 6/6 = Lengkap; slot ke-8 → x/8; gambar dalam slot tidak aktif tidak dikira.
-- **Pilihan gambar PDF**: pilihan admin diutamakan; jika tiada → terkini yang tidak ditanda; pilihan tersembunyi diabaikan.
-- **Matriks kebenaran** Seksyen 3 untuk Admin / Team / Boss; tiada tindakan "padam gambar".
+## 1. Ujian unit (17)
+- Salinan logik frontend = Apps Script.
+- Aktiviti & 8 jenis gambar: ID, minimum (C1 = 4), ukuran (B2–B4) tetap; nama/spesifikasi dari Sheet sahaja.
+- **ID tiang**: SL-034 → SSL034; carian `SSL034`, `34`, `034`, `SL-034`, `ssl34`, `SSL05` (awalan).
+- **Ukuran**: `1.3`, `1,3`, `1.3m`, `2` diterima; kosong / `abc` / `-1` / `.5` / `1.355` / `0` ditolak dengan mesej BM.
+- **Kelengkapan gambar**: semua minimum; C1 dikira 4; contoh `Pegging ✓ · Trial Pit 3/4 · Installation 2/6`;
+  tersembunyi, Ambil semula dan tanpa ukuran tidak dikira; gambar lebih daripada minimum tidak lebih dikira.
+- Status kerja (Belum mula / Dalam proses / Siap / Batal siap / kategori) dan bebas daripada status gambar.
+- **Pilihan laporan**: lalai = terkini yang baik (C1 = 4 terkini, lama → baru); pilihan admin (1, atau 4 ikut susunan);
+  pilihan yang tidak lengkap (cth. satu disembunyikan) → kembali ke automatik.
+- Senarai kekurangan per aktiviti; susun atur laporan (tajuk, lajur, kapsyen, pemisah halaman, saiz muat dalam A4).
+- **Tarikh Malaysia (UTC+8)**: 23:59:59 vs 00:00:01, sempadan tahun; tarikh tidak sah ditolak; beberapa pelan per tiang.
+- Import xlsx dummy: 123 = 33 + 44 + 46, EB 54 / WB 69, 51 CH belum tepat, ID SSL.
+- Matriks kebenaran termasuk tindakan baru (pelan, pilihan laporan, nama).
 
-## 2. Ujian backend (16 lulus)
-- `setup()` mencipta 8 tab dengan pengepala Inggeris, 123 tiang, 7 slot, admin; selamat dijalankan dua kali.
-- **Log masuk Google**: token sah → sesi + nonce; Client ID salah / emel tiada / emel tidak disahkan / pengguna tidak aktif → ralat.
-- **Sesi 30 hari**: token diubah / tamat → ditolak. **Active = FALSE, buang pengguna, atau taip FALSE terus dalam Sheet → permintaan seterusnya terus ditolak.** Tukar peranan berkuat kuasa serta-merta.
-- **Kebenaran dikuatkuasa di backend**: 14 tindakan × 3 peranan, semua betul (FORBIDDEN untuk yang tidak dibenarkan).
-- **Kategori**: tiada gambar/Siap untuk Tunggu kelulusan; Sudah dipasang boleh gambar tetapi tiada Siap; nota dibenarkan semua.
-- **Muat naik idempoten**: hantar 3× = 1 baris, 1 fail + 1 thumbnail, 1 log; folder `Solar Photos/SL-040/`; semua lajur Photos betul; tanpa GPS.
-- **Sembunyi**: Team/Boss tidak nampak (senarai, gambar penuh, thumbnail); Admin nampak; tunjuk semula; tidak dipadam; dilog.
-- Siap/Batal siap + log; editor tiang (CH tepat dikira semula, kategori, pengesahan input, setiap medan dilog); Ambil semula; satu pilihan laporan per slot; slot (tukar nama kekalkan pautan gambar, tambah, nyahaktif, susun); pengguna (tidak boleh kunci diri sendiri); nota (idempoten, Boss ditolak, teks `=formula` kekal teks).
-- **PDF**: slot dengan 3 gambar: tanpa pilihan → gambar terkini yang tidak ditanda; dengan pilihan admin → gambar dipilih; kapsyen (nama slot + spec, tarikh/masa, GPS, pengambil, Kamera/Galeri); "Tiada gambar"; status kerja dalam pengepala; dokumen sementara dibuang; disimpan dalam `Solar Reports/`; had 10 tiang; muat turun berpecah (chunk) menghasilkan bait yang sama; semua peranan boleh muat turun.
-- Log audit: admin sahaja, terbaru dahulu, boleh dicari; suapan aktiviti untuk semua tanpa urusan pengguna.
+## 2. Ujian backend (16)
+- `setup()` untuk Sheet baru: tab Activities / PhotoTypes / WorkPlan, Settings `ReportMaxPhotos = 60`, tiada tab Slots.
+- Log masuk Google + sesi 30 hari; Active = FALSE / buang pengguna → ditolak serta-merta.
+- **Kebenaran di backend**: 17 tindakan × 3 peranan (termasuk `addPlans`, `editPlan`, `removePlan`, `setReportSelection`,
+  `saveNames`, `reportCheck`, `generateReport`); muat turun PDF & Word untuk semua peranan.
+- Muat naik: ukuran wajib & disahkan untuk B2–B4 (ditolak = tidak disimpan); idempoten; nama fail `SSL040_B2_…`.
+- Pilihan laporan: tepat 1 / tepat 4 ikut susunan; berulang, jenis/tiang lain, tersembunyi ditolak; kosongkan; log.
+- Nama aktiviti/jenis: tukar nama kekalkan pautan gambar; peraturan tetap.
+- **Pelan kerja**: beberapa tiang sekali gus; beberapa pelan per tiang; pendua dilangkau; ubah (tidak boleh jadi pendua);
+  buang; tarikh/aktiviti/tiang tidak sah ditolak; setiap perubahan dalam AuditLog; semua peranan menerima pelan.
+- **Laporan**: `reportCheck` menyenaraikan tiang tidak lengkap; `generateReport` menolak tiang tidak lengkap;
+  had ikut bilangan gambar (60 → Pegging 60 / Trial Pit 15 / Installation 10).
+- **Susun atur laporan** (struktur Google Doc yang dibina): PEGGING 3 sebaris + "Total pegging : 4 nos";
+  TRIAL PIT 3 blok/halaman, kapsyen `SSL034 · WIDTH : 1.3M · LENGTH : 1.6M · DEPTH : 1.5M`, pilihan admin digunakan;
+  INSTALLATION 1 tiang/halaman, 4 gambar progress ikut susunan admin, siang & malam lebih besar; nisbah gambar dikekalkan
+  (potret 118×157, landskap 118×89); PDF **dan** Word dalam `Solar Reports/`; Doc sementara dibuang; muat turun berpecah sama bait.
+- **Migrasi v1 → v2**: ID ditukar dalam Poles, Photos, Notes, WorkPlan, Reports; folder & fail Drive ditukar nama (termasuk
+  kes folder lama + baru wujud); slot lama dipetakan; Slots → Slots_old; satu entri `MigrationV2`; sejarah AuditLog lama
+  tidak diubah; **jalankan kali kedua = tiada perubahan langsung**; ID tidak dikenali → berhenti **sebelum** apa-apa ditukar.
+- Item yang masih dalam barisan telefon dari aplikasi v1 (SL-040, slot S1) masih diterima selepas migrasi.
 
-## 3. Ujian pelayar (10 lulus)
-- **Dashboard**: 33/123, 0/44, 44, 46, 0, 44; EB 23/54, WB 10/69. **Jadual**: 123 / EB 54 / WB 69 / Tunggu 46 / Perlu pasang 44 / Siap 33; carian; susunan chainage; label CH belum tepat.
-- **Luar talian**: 1 gambar kamera + 1 galeri + nota + Siap semasa offline → "⏳ 4 item menunggu line" → **muat semula aplikasi semasa offline** (dari service worker + IndexedDB) → semua masih ada → online, dengan **jawapan muat naik pertama sengaja "hilang"** → aplikasi cuba lagi → pelayan: tepat 2 gambar, 1 nota, Siap, 2 log (**tiada pendua, tiada yang hilang**). Tiada CORS preflight.
-- **Sesi tamat semasa offline**: banner "Sesi log masuk tamat — 2 item belum dihantar" → skrin log masuk menunjukkan item masih disimpan → log masuk → semua dihantar sekali.
-- Nonce salah ditolak; mesej `#loginerror` dalam BM.
-- **UI peranan**: Boss tiada kamera/nota/Siap/Edit/Admin/Jana PDF; Team tiada Edit/Admin; Tunggu kelulusan: hanya nota; Sudah dipasang: gambar ya, Siap tidak.
-- **Admin**: Ambil semula, ★ Pilih untuk laporan, Sembunyikan (Team tidak nampak), edit tiang (CH tepat + kategori), jana PDF (2 tiang) & muat turun (Admin dan Team).
-- Skrin Pengguna & Slot (tambah, tukar peranan, nyahaktif, buang; tukar nama slot, susun, slot ke-8 → 0/8); log audit.
-- **Watermark** (gambar contoh dalam `test-output/`):
-  1. Kamera tanpa EXIF: 2400×1800 → 1600×1200, `21/11/2026 14:05` + `GPS: 3.12346, 101.65432 ±8 m`, sudut kanan bawah
-  2. Galeri dengan EXIF: masa & GPS dari EXIF, tiada label, GPS telefon tidak diminta
-  3. Galeri tanpa EXIF: masa muat naik + GPS semasa + **"Dari galeri"**, potret kekal
-  4. Galeri ada tarikh EXIF tetapi tiada GPS: tarikh EXIF + GPS semasa + "Dari galeri"
-  5. Tiada GPS: **"GPS tidak tersedia"**, GPSAvailable = FALSE
-- **GPS**: tunggu sehingga had masa lalu null; fix lambat diterima; fix segar diguna semula; ditolak → null serta-merta; aplikasi guna had 15 saat. Gambar sebenar tanpa kebenaran lokasi → `GPSAvailable = FALSE`.
+## 3. Ujian pelayar (14)
+- Dashboard & Jadual (admin: tab Semua, tapis, carian `34`).
+- **Esok / Hari ini**: Team/Boss dibuka pada Esok; jam 23:59 (5 Jan) → Esok = 6 Jan; jam 00:00:30 (6 Jan) → 6 Jan
+  menjadi Hari ini dan Esok kosong ("Tiada kerja dirancang untuk esok."); disusun ikut chainage; label aktiviti
+  (beberapa pelan → "Trial Pit · Installation"; kosong → tiada label); **dimuat semula tanpa line → pelan masih ada**.
+- Admin rancang kerja dari Jadual (tanda 2 tiang → tarikh lalai esok → aktiviti) → pendua dilangkau → ubah & buang di skrin tiang.
+- Skrin tiang: 3 kumpulan, spesifikasi Trial Pit, bilangan/minimum; dialog ukuran (kosong/huruf/3 perpuluhan/0 ditolak,
+  `1,3` diterima → "1.3 m" di bawah gambar); "Buang gambar ini" tidak menyimpan apa-apa.
+- **Luar talian**: gambar (termasuk ukuran), nota, Siap → muat semula aplikasi → ukuran masih dipaparkan → online dengan
+  jawapan hilang → tepat 2 gambar, tiada pendua, ukuran tersimpan.
+- Sesi tamat semasa luar talian → log masuk semula → semua dihantar sekali.
+- Peranan UI: Boss tiada kamera/nota/Siap/pilihan laporan/tanda tiang; Team tiada pilihan laporan & tanda tiang.
+- **Admin**: pilih 4 gambar Progress ikut susunan (Simpan hanya aktif pada 4), Ambil semula; laporan Trial Pit dengan satu
+  tiang tidak lengkap → senarai amaran → "Teruskan tanpa tiang ini" → laporan 2 tiang; muat turun **PDF dan Word**;
+  semua tiang tidak lengkap → tiada laporan dijana.
+- Tukar nama jenis/spesifikasi → dipaparkan pada skrin tiang; pengguna; log audit.
+- Watermark (5 kes), GPS 15 saat, tanpa kebenaran lokasi, `config.js` dikemas kini dari GitHub.
 
-## Pepijat yang ditemui & dibaiki semasa ujian
-1. Pustaka EXIF versi "legacy" gagal membaca tarikh pada gambar tanpa GPS → ditukar ke versi standard (iOS 12+ / Android moden).
-2. Skrin log masuk menyimpan nonce hanya selepas skrip Google dimuatkan → kini disimpan dahulu.
-3. Fail Apps Script dimuatkan dalam susunan rawak → kod tidak lagi bergantung pada susunan fail (diuji dengan Code.gs dimuatkan dahulu).
+## Pepijat ditemui & dibaiki
+1. Carian `ssl34` tidak menjumpai SSL034 → dibaiki (dan `SSL05` kini awalan + bentuk berpad).
+2. Ujian dahulu mengandungi chainage sebenar → kini data dummy; ujian penjaga ditambah.
 
-## Senarai semak untuk anda — telefon sebenar (selepas setup)
-
-Uji pada **satu Android (Chrome)** dan **satu iPhone (Safari)**:
-
-- [ ] Pasang ke skrin utama, buka dari ikon (tiada bar alamat)
-- [ ] Log masuk Google dari ikon → "Teruskan ke aplikasi" → kembali ke aplikasi dan kekal log masuk selepas ditutup/dibuka
-- [ ] Emel yang tiada dalam Users → mesej ditolak
-- [ ] Benarkan Lokasi & Kamera; **📷 Kamera** membuka kamera belakang
-- [ ] Gambar kamera: watermark tarikh/masa betul (waktu Malaysia) + GPS ±m; semak koordinat dengan Google Maps (ketik gambar → Peta)
-- [ ] **🖼️ Galeri**: gambar lama → tarikh/GPS asal (iPhone kadang-kadang buang GPS → akan keluar "Dari galeri"; ini dijangka)
-- [ ] Gambar muncul dalam Drive `Solar Photos/SL-xxx/` dan baris dalam tab Photos
-- [ ] **Mod kapal terbang**: ambil 2 gambar + nota + Siap → "⏳ 4 item menunggu line" → tutup aplikasi sepenuhnya → buka semula (masih offline) → item masih ada → matikan mod kapal terbang → "✅ Semua disimpan" → semak Sheet: tiada pendua
-- [ ] GPS di kawasan terbuka tanpa data mudah alih (mod kapal terbang + lokasi ON) → GPS masih dapat
-- [ ] Akaun Boss: tiada butang kamera/nota/Siap
-- [ ] Admin: nyahaktif seorang pengguna → telefonnya ditolak pada tindakan seterusnya
-- [ ] Admin: Ambil semula / Sembunyikan / ★ Pilih untuk laporan / Edit tiang / tukar kategori
-- [ ] Jana PDF 2–3 tiang → buka dalam Drive `Solar Reports/` → semak gambar & kapsyen → muat turun dari telefon Boss
-- [ ] Teks dalam watermark mudah dibaca pada skrin telefon
-- [ ] Ambil gambar ketika bateri jimat kuasa / memori rendah (iPhone lama): aplikasi tidak tergantung
+## Senarai semak telefon sebenar (selepas kemas kini v2)
+- [ ] `migrateV2` → log "selesai"; jalankan sekali lagi → "tiada perubahan"
+- [ ] Deploy → Manage deployments → New version; URL sama; log masuk masih berfungsi
+- [ ] Telefon: "Versi baru aplikasi dipasang" → buka semula → ID `SSL…`
+- [ ] Pasukan: tab **Esok** menunjukkan pelan admin; mod kapal terbang → buka semula → pelan masih ada
+- [ ] Trial Pit → Lebar: papan kekunci nombor muncul (Android & iPhone); `1,3` diterima; kosong ditolak
+- [ ] Progress pemasangan: ambil 5 gambar; admin pilih 4 ikut susunan
+- [ ] Jana laporan **Pegging**, **Trial Pit**, **Installation** → buka PDF dalam Drive; buka **.docx dalam Microsoft Word**
+      (jadual, saiz gambar, kapsyen kekal); muat turun dari telefon Boss
+- [ ] Laporan dengan tiang tidak lengkap → senarai amaran → Teruskan / Batal
+- [ ] Watermark masih jelas dalam gambar laporan
+- [ ] Semua item dalam senarai semak v1 (kamera, GPS, luar talian, peranan) masih berfungsi

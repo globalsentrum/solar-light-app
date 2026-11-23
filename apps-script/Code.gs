@@ -2,9 +2,10 @@
  * Solar Street Light — Apps Script backend (JSON API).
  * Karak Highway, Package 2A.
  *
- * Files in this Apps Script project:  Code.gs (this), Logic.gs, SeedData.gs
- * First time: run setup() once from the editor, then Deploy > New deployment > Web app
+ * Files in this Apps Script project:  Code.gs (this), Logic.gs, SeedData.gs (private)
+ * New Google Sheet: run setup() once from the editor, then Deploy > New deployment > Web app
  *   Execute as: Me    Who has access: Anyone
+ * Existing v1 Sheet (slots, SL-xxx IDs): run migrateV2() once (safe to run again).
  *
  * Every request: POST, body = JSON text (Content-Type text/plain to avoid CORS preflight):
  *   { "action": "...", "token": "<session token>", ...params }
@@ -22,12 +23,14 @@ var MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 
 var SCHEMA = {
   Poles: ['PoleID', 'Bound', 'Chainage', 'ChainageExact', 'Category', 'PlannedDate', 'IsDone', 'DoneBy', 'DoneAt', 'UpdatedAt'],
-  Photos: ['PhotoID', 'PoleID', 'SlotID', 'DriveFileID', 'FileURL', 'Source', 'CapturedAt', 'UploadedAt', 'Latitude', 'Longitude', 'AccuracyM', 'GPSAvailable', 'TakenBy', 'Hidden', 'RetakeFlag', 'SelectedForReport'],
-  Slots: ['SlotID', 'Order', 'Name', 'Spec', 'Active'],
+  Photos: ['PhotoID', 'PoleID', 'PhotoTypeID', 'DriveFileID', 'FileURL', 'Source', 'CapturedAt', 'UploadedAt', 'Latitude', 'Longitude', 'AccuracyM', 'GPSAvailable', 'TakenBy', 'Hidden', 'RetakeFlag', 'ReportOrder', 'MeasurementM'],
+  Activities: ['ActivityID', 'Name', 'Spec'],
+  PhotoTypes: ['TypeID', 'ActivityID', 'Name'],
+  WorkPlan: ['PlanID', 'Date', 'PoleID', 'Activity', 'CreatedBy', 'CreatedAt'],
   Notes: ['NoteID', 'PoleID', 'Text', 'CreatedBy', 'CreatedAt'],
   Users: ['Email', 'Name', 'Role', 'Active'],
   AuditLog: ['Timestamp', 'UserEmail', 'Action', 'Entity', 'EntityID', 'Field', 'OldValue', 'NewValue'],
-  Reports: ['ReportID', 'PoleIDs', 'FileURL', 'CreatedBy', 'CreatedAt'],
+  Reports: ['ReportID', 'PoleIDs', 'Activity', 'FileURL', 'DocxURL', 'CreatedBy', 'CreatedAt'],
   Settings: ['Key', 'Value']
 };
 
@@ -35,12 +38,12 @@ var DEFAULT_SETTINGS = {
   ProjectName: 'Cadangan Pelebaran Lebuhraya Kuala Lumpur – Karak, Seksyen 2, Package 2A — Solar Street Lighting',
   ClientID: '',
   AppURL: '',
-  ReportMaxPoles: '10',
+  ReportMaxPhotos: '60',
   SessionDays: '30',
   PhotosFolderID: '',
-  ReportsFolderID: '',
-  TemplateDocID: ''
+  ReportsFolderID: ''
 };
+var REPORT_KEYS = { A: 'PEGGING', B: 'TRIALPIT', C: 'INSTALLATION' };
 
 
 
@@ -82,7 +85,7 @@ function sheet_(name) {
 
 function normValue_(v, header) {
   if (v instanceof Date) {
-    return header === 'PlannedDate' ? Utilities.formatDate(v, TZ, 'yyyy-MM-dd')
+    return header === 'PlannedDate' || header === 'Date' ? Utilities.formatDate(v, TZ, 'yyyy-MM-dd')
       : Utilities.formatDate(v, TZ, "yyyy-MM-dd'T'HH:mm:ssXXX");
   }
   if (typeof v === 'string') return v.trim();
@@ -271,6 +274,9 @@ function handle_(body) {
     var fn = ACTIONS[action];
     if (!fn) throw apiError_('BAD', 'Tindakan tidak dikenali: ' + action);
     var user = userFromToken_(body.token);
+    // Items queued on a phone by the old v1 app (pole "SL-034", slot "S1") still sync after the migration.
+    if (body.poleId) body.poleId = SolarLogic.poleIdFromLegacy(body.poleId) || body.poleId;
+    if (action === 'uploadPhoto' && !body.typeId && body.slotId) body.typeId = SolarLogic.LEGACY_SLOT_MAP[str_(body.slotId)] || '';
     var out = fn(user, body) || {};
     out.ok = true;
     return out;
@@ -332,13 +338,29 @@ function poleOut_(p) {
 
 function photoOut_(p) {
   var o = clean_([p])[0];
-  ['Hidden', 'RetakeFlag', 'SelectedForReport', 'GPSAvailable'].forEach(function (k) { o[k] = SolarLogic.bool(o[k]); });
-  ['Latitude', 'Longitude', 'AccuracyM'].forEach(function (k) { o[k] = o[k] === '' ? '' : Number(o[k]); });
+  ['Hidden', 'RetakeFlag', 'GPSAvailable'].forEach(function (k) { o[k] = SolarLogic.bool(o[k]); });
+  ['Latitude', 'Longitude', 'AccuracyM', 'MeasurementM'].forEach(function (k) { o[k] = o[k] === '' || o[k] === undefined ? '' : Number(o[k]); });
+  o.ReportOrder = Number(o.ReportOrder) > 0 ? Number(o.ReportOrder) : 0;
   return o;
 }
 
-function slotOut_(s) {
-  return { SlotID: str_(s.SlotID), Order: Number(s.Order), Name: str_(s.Name), Spec: str_(s.Spec), Active: SolarLogic.bool(s.Active) };
+function typesNow_() { return SolarLogic.photoTypes(readTable_('PhotoTypes').rows); }
+function activitiesNow_() { return SolarLogic.activities(readTable_('Activities').rows); }
+function activityArg_(v) {
+  var a = str_(v);
+  if (!REPORT_KEYS[a]) throw apiError_('BAD', 'Aktiviti tidak sah.');
+  return a;
+}
+function poleIdsArg_(list, poles) {
+  var ids = (list || []).map(str_);
+  if (!ids.length) throw apiError_('BAD', 'Pilih sekurang-kurangnya satu tiang.');
+  var seen = {};
+  ids.forEach(function (id) {
+    if (seen[id]) throw apiError_('BAD', 'Tiang berulang: ' + id);
+    seen[id] = true;
+    getPole_(poles, id);
+  });
+  return ids.sort();
 }
 
 // =====================================================================
@@ -370,9 +392,11 @@ ACTIONS.bootstrap = function (user) {
     user: user,
     serverTime: nowIso_(),
     projectName: s.ProjectName,
-    reportMaxPoles: Number(s.ReportMaxPoles) || 10,
+    reportMaxPhotos: Number(s.ReportMaxPhotos) || 60,
     poles: readTable_('Poles').rows.map(poleOut_),
-    slots: readTable_('Slots').rows.map(slotOut_),
+    activities: activitiesNow_(),
+    types: typesNow_(),
+    plans: clean_(readTable_('WorkPlan').rows),
     photos: photos,
     notes: clean_(readTable_('Notes').rows),
     reports: clean_(readTable_('Reports').rows).reverse(),
@@ -404,27 +428,35 @@ ACTIONS.uploadPhoto = function (user, b) {
     if (existing) return { duplicate: true, photo: photoOut_(existing) };
     var pole = getPole_(readTable_('Poles'), str_(req_(b, 'poleId')));
     assert_(user, 'uploadPhoto', pole);
-    var slotId = str_(req_(b, 'slotId'));
-    if (!find_(readTable_('Slots'), 'SlotID', slotId)) throw apiError_('BAD', 'Slot tidak dijumpai: ' + slotId);
+    var typeId = str_(req_(b, 'typeId'));
+    var type = SolarLogic.typeById(typeId);
+    if (!type) throw apiError_('BAD', 'Jenis gambar tidak dijumpai: ' + typeId);
+    var measurement = '';
+    if (type.NeedsMeasurement) {
+      var m = SolarLogic.parseMeasurement(b.measurement);
+      if (!m.ok) throw apiError_('BAD', m.error);
+      measurement = SolarLogic.formatMeasurement(m.value);
+    }
     var source = b.source === 'Gallery' ? 'Gallery' : 'Camera';
     var bytes = Utilities.base64Decode(str_(req_(b, 'imageB64')));
     if (bytes.length > MAX_IMAGE_BYTES) throw apiError_('BAD', 'Gambar terlalu besar.');
     var stamp = Utilities.formatDate(new Date(), TZ, 'yyyyMMdd-HHmmss');
     var folder = poleFolder_(pole.PoleID);
     var file = folder.createFile(Utilities.newBlob(bytes, 'image/jpeg',
-      pole.PoleID + '_' + slotId + '_' + stamp + '_' + photoId + '.jpg'));
+      pole.PoleID + '_' + typeId + '_' + stamp + '_' + photoId + '.jpg'));
     if (b.thumbB64) {
       folder.createFile(Utilities.newBlob(Utilities.base64Decode(str_(b.thumbB64)), 'image/jpeg', photoId + '_thumb.jpg'));
     }
     var gps = b.gpsAvailable === true && b.latitude !== '' && b.latitude !== null && b.latitude !== undefined;
     var row = appendObj_(photos, {
-      PhotoID: photoId, PoleID: pole.PoleID, SlotID: slotId, DriveFileID: file.getId(), FileURL: file.getUrl(),
+      PhotoID: photoId, PoleID: pole.PoleID, PhotoTypeID: typeId, DriveFileID: file.getId(), FileURL: file.getUrl(),
       Source: source, CapturedAt: str_(b.capturedAt) || nowIso_(), UploadedAt: nowIso_(),
       Latitude: gps ? Number(b.latitude).toFixed(6) : '', Longitude: gps ? Number(b.longitude).toFixed(6) : '',
       AccuracyM: gps && b.accuracy !== '' && b.accuracy != null ? Math.round(Number(b.accuracy)) : '',
-      GPSAvailable: gps, TakenBy: user.email, Hidden: false, RetakeFlag: false, SelectedForReport: false
+      GPSAvailable: gps, TakenBy: user.email, Hidden: false, RetakeFlag: false, ReportOrder: '', MeasurementM: measurement
     });
-    audit_(user, 'PhotoAdded', 'Photo', photoId, 'Pole/Slot', '', pole.PoleID + '/' + slotId + ' (' + source + ')');
+    audit_(user, 'PhotoAdded', 'Photo', photoId, 'Pole/Type', '', pole.PoleID + '/' + typeId + ' (' + source + ')' +
+      (measurement ? ' ' + measurement + 'm' : ''));
     return { photo: photoOut_(row) };
   });
 };
@@ -565,26 +597,42 @@ ACTIONS.setPhotoFlag = function (user, b) {
   });
 };
 
-/** Admin: choose the photo used in the PDF for its slot (only one per pole+slot). value=false clears. */
-ACTIONS.selectForReport = function (user, b) {
+/**
+ * Admin: choose the photo(s) used in the report for one pole + photo type.
+ * photoIds in report order: exactly 1 (C1: exactly 4). An empty list clears the choice (automatic default).
+ */
+ACTIONS.setReportSelection = function (user, b) {
   assert_(user, 'selectReport');
-  var value = b.value !== false;
+  var typeId = str_(req_(b, 'typeId'));
+  var type = SolarLogic.typeById(typeId);
+  if (!type) throw apiError_('BAD', 'Jenis gambar tidak sah.');
+  var ids = (b.photoIds || []).map(str_);
+  if (ids.length && ids.length !== type.ReportCount) {
+    throw apiError_('BAD', 'Pilih tepat ' + type.ReportCount + ' gambar untuk ' + type.Name + '.');
+  }
+  var seen = {};
+  ids.forEach(function (id) { if (seen[id]) throw apiError_('BAD', 'Gambar berulang.'); seen[id] = true; });
   return withLock_(function () {
+    var poleId = str_(req_(b, 'poleId'));
+    getPole_(readTable_('Poles'), poleId);
     var photos = readTable_('Photos');
-    var p = find_(photos, 'PhotoID', str_(req_(b, 'photoId')));
-    if (!p) throw apiError_('NOTFOUND', 'Gambar tidak dijumpai.');
+    ids.forEach(function (id) {
+      var p = find_(photos, 'PhotoID', id);
+      if (!p || p.PoleID !== poleId || p.PhotoTypeID !== typeId) throw apiError_('BAD', 'Gambar bukan dari tiang/jenis ini.');
+      if (SolarLogic.bool(p.Hidden)) throw apiError_('BAD', 'Gambar tersembunyi tidak boleh dipilih.');
+    });
     var changed = [];
     photos.rows.forEach(function (o) {
-      if (o.PoleID !== p.PoleID || o.SlotID !== p.SlotID) return;
-      var want = value && o.PhotoID === p.PhotoID;
-      if (SolarLogic.bool(o.SelectedForReport) !== want) {
-        updateObj_(photos, o, { SelectedForReport: want });
+      if (o.PoleID !== poleId || o.PhotoTypeID !== typeId) return;
+      var want = ids.indexOf(o.PhotoID) + 1;
+      var have = Number(o.ReportOrder) > 0 ? Number(o.ReportOrder) : 0;
+      if (want !== have) {
+        updateObj_(photos, o, { ReportOrder: want || '' });
         changed.push(photoOut_(o));
       }
     });
     if (changed.length) {
-      audit_(user, value ? 'ReportPhotoSelected' : 'ReportPhotoUnselected', 'Photo', p.PhotoID, 'SelectedForReport',
-        '', p.PoleID + '/' + p.SlotID);
+      audit_(user, ids.length ? 'ReportSelectionSet' : 'ReportSelectionCleared', 'Pole', poleId, typeId, '', ids.join(', '));
     }
     return { photos: changed };
   });
@@ -636,58 +684,97 @@ ACTIONS.removeUser = function (user, b) {
   });
 };
 
-// ---------------- Slots ----------------
-/** Add (no slotId) or edit a slot: name, spec, active. Photos link to SlotID so renaming is safe. */
-ACTIONS.saveSlot = function (user, b) {
-  assert_(user, 'manageSlots');
-  var name = str_(req_(b, 'name')).trim();
-  var spec = str_(b.spec).trim();
-  var active = b.active !== false;
+// ---------------- Activity / photo type names (IDs and rules are fixed) ----------------
+/** { activities: [{ActivityID, Name, Spec}], types: [{TypeID, Name}] } — only names and the activity spec change. */
+ACTIONS.saveNames = function (user, b) {
+  assert_(user, 'manageTypes');
   return withLock_(function () {
-    var slots = readTable_('Slots');
-    var s;
-    if (b.slotId) {
-      s = find_(slots, 'SlotID', str_(b.slotId));
-      if (!s) throw apiError_('NOTFOUND', 'Slot tidak dijumpai.');
+    var at = readTable_('Activities'), tt = readTable_('PhotoTypes');
+    (b.activities || []).forEach(function (x) {
+      var row = find_(at, 'ActivityID', str_(x.ActivityID));
+      if (!row) throw apiError_('BAD', 'Aktiviti tidak sah: ' + x.ActivityID);
+      var name = str_(x.Name).trim(), spec = str_(x.Spec).trim();
+      if (!name) throw apiError_('BAD', 'Nama aktiviti tidak boleh kosong.');
       var upd = {};
-      if (str_(s.Name) !== name) upd.Name = name;
-      if (str_(s.Spec) !== spec) upd.Spec = spec;
-      if (SolarLogic.bool(s.Active) !== active) upd.Active = active;
-      Object.keys(upd).forEach(function (k) { audit_(user, 'SlotEdited', 'Slot', s.SlotID, k, s[k], upd[k]); });
-      if (Object.keys(upd).length) updateObj_(slots, s, upd);
-    } else {
-      var maxN = 0, maxOrder = 0;
-      slots.rows.forEach(function (r) {
-        var n = parseInt(str_(r.SlotID).replace(/^S/, ''), 10);
-        if (n > maxN) maxN = n;
-        if (Number(r.Order) > maxOrder) maxOrder = Number(r.Order);
-      });
-      s = appendObj_(slots, { SlotID: 'S' + (maxN + 1), Order: maxOrder + 1, Name: name, Spec: spec, Active: active });
-      audit_(user, 'SlotAdded', 'Slot', s.SlotID, 'Name', '', name);
-    }
-    return { slots: slots.rows.map(slotOut_) };
+      if (str_(row.Name) !== name) upd.Name = name;
+      if (str_(row.Spec) !== spec) upd.Spec = spec;
+      Object.keys(upd).forEach(function (k) { audit_(user, 'ActivityEdited', 'Activity', row.ActivityID, k, row[k], upd[k]); });
+      if (Object.keys(upd).length) updateObj_(at, row, upd);
+    });
+    (b.types || []).forEach(function (x) {
+      var row = find_(tt, 'TypeID', str_(x.TypeID));
+      if (!row) throw apiError_('BAD', 'Jenis gambar tidak sah: ' + x.TypeID);
+      var name = str_(x.Name).trim();
+      if (!name) throw apiError_('BAD', 'Nama jenis gambar tidak boleh kosong.');
+      if (str_(row.Name) !== name) {
+        audit_(user, 'PhotoTypeEdited', 'PhotoType', row.TypeID, 'Name', row.Name, name);
+        updateObj_(tt, row, { Name: name });
+      }
+    });
+    return { activities: SolarLogic.activities(at.rows), types: SolarLogic.photoTypes(tt.rows) };
   });
 };
 
-/** Move a slot up (-1) or down (+1). Orders are renumbered 1..n. */
-ACTIONS.moveSlot = function (user, b) {
-  assert_(user, 'manageSlots');
-  var dir = Number(b.dir) < 0 ? -1 : 1;
+// ---------------- Work plan (Pelan kerja) ----------------
+function planArgs_(b) {
+  var date = str_(req_(b, 'date'));
+  if (!SolarLogic.isIsoDate(date)) throw apiError_('BAD', 'Tarikh tidak sah.');
+  var act = str_(b.activityId);
+  if (act && !REPORT_KEYS[act]) throw apiError_('BAD', 'Aktiviti tidak sah.');
+  return { date: date, act: act };
+}
+function planText_(p) { return p.PoleID + ' ' + p.Date + (p.Activity ? ' ' + p.Activity : ''); }
+function planDup_(t, poleId, date, act, exceptId) {
+  return t.rows.some(function (r) {
+    return r.PlanID !== exceptId && r.PoleID === poleId && r.Date === date && str_(r.Activity) === act;
+  });
+}
+
+/** Admin: plan one or more poles for a date (+ optional activity). Exact duplicates are skipped. */
+ACTIONS.addPlans = function (user, b) {
+  assert_(user, 'planWork');
+  var a = planArgs_(b);
   return withLock_(function () {
-    var slots = readTable_('Slots');
-    var list = slots.rows.slice().sort(function (a, c) { return Number(a.Order) - Number(c.Order); });
-    var i = -1;
-    list.forEach(function (r, k) { if (str_(r.SlotID) === str_(b.slotId)) i = k; });
-    if (i < 0) throw apiError_('NOTFOUND', 'Slot tidak dijumpai.');
-    var j = i + dir;
-    if (j >= 0 && j < list.length) {
-      var tmp = list[i]; list[i] = list[j]; list[j] = tmp;
-      list.forEach(function (r, k) {
-        if (Number(r.Order) !== k + 1) updateObj_(slots, r, { Order: k + 1 });
-      });
-      audit_(user, 'SlotReordered', 'Slot', str_(b.slotId), 'Order', i + 1, j + 1);
-    }
-    return { slots: slots.rows.map(slotOut_) };
+    var ids = poleIdsArg_(b.poleIds, readTable_('Poles'));
+    var t = readTable_('WorkPlan');
+    var added = 0, skipped = 0;
+    ids.forEach(function (id) {
+      if (planDup_(t, id, a.date, a.act, '')) { skipped++; return; }
+      var row = appendObj_(t, { PlanID: 'P' + Utilities.getUuid().replace(/-/g, '').slice(0, 12), Date: a.date, PoleID: id,
+        Activity: a.act, CreatedBy: user.email, CreatedAt: nowIso_() });
+      audit_(user, 'PlanAdded', 'WorkPlan', row.PlanID, 'Pole/Date/Activity', '', planText_(row));
+      added++;
+    });
+    return { added: added, skipped: skipped, plans: clean_(t.rows) };
+  });
+};
+
+ACTIONS.editPlan = function (user, b) {
+  assert_(user, 'planWork');
+  var a = planArgs_(b);
+  return withLock_(function () {
+    var t = readTable_('WorkPlan');
+    var row = find_(t, 'PlanID', str_(req_(b, 'planId')));
+    if (!row) throw apiError_('NOTFOUND', 'Pelan tidak dijumpai.');
+    if (planDup_(t, row.PoleID, a.date, a.act, row.PlanID)) throw apiError_('BAD', 'Pelan yang sama sudah wujud.');
+    var upd = {};
+    if (row.Date !== a.date) upd.Date = a.date;
+    if (str_(row.Activity) !== a.act) upd.Activity = a.act;
+    Object.keys(upd).forEach(function (k) { audit_(user, 'PlanEdited', 'WorkPlan', row.PlanID, k, row[k], upd[k]); });
+    if (Object.keys(upd).length) updateObj_(t, row, upd);
+    return { plans: clean_(t.rows) };
+  });
+};
+
+ACTIONS.removePlan = function (user, b) {
+  assert_(user, 'planWork');
+  return withLock_(function () {
+    var t = readTable_('WorkPlan');
+    var row = find_(t, 'PlanID', str_(req_(b, 'planId')));
+    if (!row) throw apiError_('NOTFOUND', 'Pelan tidak dijumpai.');
+    t.sheet.deleteRow(row._row);
+    audit_(user, 'PlanRemoved', 'WorkPlan', row.PlanID, 'Pole/Date/Activity', planText_(row), '');
+    return { plans: clean_(readTable_('WorkPlan').rows) };
   });
 };
 
@@ -705,33 +792,63 @@ ACTIONS.audit = function (user, b) {
   return { total: rows.length, rows: rows.slice(offset, offset + limit) };
 };
 
-// ---------------- Reports ----------------
+// ---------------- Reports (photo pages per activity; PDF + Word) ----------------
+function reportLimit_(activityId) {
+  var max = Number(settings_().ReportMaxPhotos) || 60;
+  return Math.max(1, Math.floor(max / SolarLogic.reportPhotoCount(activityId)));
+}
+
+/** Before generating: which ticked poles are missing photos/measurements for this activity. */
+ACTIONS.reportCheck = function (user, b) {
+  assert_(user, 'generateReport');
+  var act = activityArg_(b.activityId);
+  var ids = poleIdsArg_(b.poleIds, readTable_('Poles'));
+  var photos = readTable_('Photos').rows.map(photoOut_);
+  var types = typesNow_();
+  var missing = [], ready = [];
+  ids.forEach(function (id) {
+    var m = SolarLogic.reportMissing(act, id, types, photos);
+    if (m.length) missing.push({ PoleID: id, missing: m }); else ready.push(id);
+  });
+  return { ready: ready, missing: missing, maxPoles: reportLimit_(act) };
+};
+
 ACTIONS.generateReport = function (user, b) {
   assert_(user, 'generateReport');
-  var ids = (b.poleIds || []).map(str_);
-  var max = Number(settings_().ReportMaxPoles) || 10;
-  if (!ids.length) throw apiError_('BAD', 'Pilih sekurang-kurangnya satu tiang.');
-  if (ids.length > max) throw apiError_('BAD', 'Maksimum ' + max + ' tiang bagi satu laporan.');
-  var poles = readTable_('Poles');
-  ids.forEach(function (id) { getPole_(poles, id); });
+  var act = activityArg_(b.activityId);
+  var ids = poleIdsArg_(b.poleIds, readTable_('Poles'));
+  var max = reportLimit_(act);
+  if (ids.length > max) throw apiError_('BAD', 'Maksimum ' + max + ' tiang bagi satu laporan ' + activitiesNow_()[act.charCodeAt(0) - 65].Name + '.');
+  var photos = readTable_('Photos').rows.map(photoOut_);
+  var types = typesNow_();
+  var bad = [];
+  ids.forEach(function (id) {
+    var m = SolarLogic.reportMissing(act, id, types, photos);
+    if (m.length) bad.push(id + ': ' + m.join(', '));
+  });
+  if (bad.length) throw apiError_('BAD', 'Tiang tidak lengkap untuk laporan ini — ' + bad.join('; '));
   var reportId = 'R' + Utilities.formatDate(new Date(), TZ, 'yyyyMMdd-HHmmss') + '-' + Utilities.getUuid().slice(0, 4);
-  var file = buildReportPdf_(user, ids, reportId);
+  var spec = SolarLogic.buildReportSpec(act, ids, types, photos);
+  var name = 'Laporan_' + REPORT_KEYS[act] + '_' + Utilities.formatDate(new Date(), TZ, 'yyyyMMdd-HHmm') + '_' +
+    (ids.length > 1 ? ids[0] + '-' + ids[ids.length - 1] : ids[0]);
+  var files = renderReport_(name, spec, photos);
   var row = withLock_(function () {
-    var r = appendObj_(readTable_('Reports'), { ReportID: reportId, PoleIDs: ids.join(', '), FileURL: file.getUrl(),
-      CreatedBy: user.email, CreatedAt: nowIso_() });
-    audit_(user, 'ReportGenerated', 'Report', reportId, 'PoleIDs', '', ids.join(', '));
+    var r = appendObj_(readTable_('Reports'), { ReportID: reportId, PoleIDs: ids.join(', '), Activity: act,
+      FileURL: files.pdf.getUrl(), DocxURL: files.docx.getUrl(), CreatedBy: user.email, CreatedAt: nowIso_() });
+    audit_(user, 'ReportGenerated', 'Report', reportId, REPORT_KEYS[act], '', ids.join(', '));
     return r;
   });
   return { report: clean_([row])[0] };
 };
 
-/** Download a generated PDF in 4 MB pieces (base64). All roles. */
+/** Download a generated PDF (format "pdf") or Word file ("docx") in 4 MB pieces (base64). All roles. */
 ACTIONS.downloadReport = function (user, b) {
   assert_(user, 'downloadReport');
   var r = find_(readTable_('Reports'), 'ReportID', str_(req_(b, 'reportId')));
   if (!r) throw apiError_('NOTFOUND', 'Laporan tidak dijumpai.');
-  var m = str_(r.FileURL).match(/\/d\/([A-Za-z0-9_-]+)/);
-  if (!m) throw apiError_('SERVER', 'Pautan fail laporan rosak.');
+  var url = b.format === 'docx' ? r.DocxURL : r.FileURL;
+  var m = str_(url).match(/\/d\/([A-Za-z0-9_-]+)/);
+  if (!m) throw apiError_('NOTFOUND', b.format === 'docx' ? 'Tiada fail Word untuk laporan ini.' : 'Pautan fail laporan rosak.');
   var f = DriveApp.getFileById(m[1]);
   var bytes = f.getBlob().getBytes();
   var offset = Math.max(0, Number(b.offset) || 0);
@@ -740,102 +857,97 @@ ACTIONS.downloadReport = function (user, b) {
     b64: Utilities.base64Encode(bytes.slice(offset, end)) };
 };
 
-function fmtDateTime_(iso) {
-  var m = str_(iso).match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
-  return m ? m[3] + '/' + m[2] + '/' + m[1] + ' ' + m[4] + ':' + m[5] : str_(iso);
-}
-
-function photoCaption_(slot, photo, names) {
-  var title = slot.Order + '. ' + slot.Name + (slot.Spec ? ' (' + slot.Spec + ')' : '');
-  if (!photo) return [title, 'Tiada gambar'];
-  var gps = SolarLogic.bool(photo.GPSAvailable)
-    ? 'GPS: ' + Number(photo.Latitude).toFixed(5) + ', ' + Number(photo.Longitude).toFixed(5) +
-      (photo.AccuracyM !== '' ? ' (±' + photo.AccuracyM + ' m)' : '')
-    : 'GPS tidak tersedia';
-  return [title, 'Tarikh/masa: ' + fmtDateTime_(photo.CapturedAt), gps,
-    'Diambil oleh: ' + (names[normEmail_(photo.TakenBy)] || photo.TakenBy),
-    'Sumber: ' + (photo.Source === 'Gallery' ? 'Galeri' : 'Kamera')];
-}
-
-/** Template copy -> one section per pole -> PDF in "Solar Reports". Returns the PDF Drive file. */
-function buildReportPdf_(user, ids, reportId) {
-  var s = settings_();
-  if (!s.TemplateDocID || !s.ReportsFolderID) throw apiError_('SERVER', 'Templat laporan belum disediakan. Jalankan setup().');
-  var folder = DriveApp.getFolderById(s.ReportsFolderID);
-  var copy = DriveApp.getFileById(s.TemplateDocID).makeCopy('tmp_' + reportId, folder);
-  var poles = readTable_('Poles');
-  var slots = SolarLogic.activeSlots(readTable_('Slots').rows.map(slotOut_));
-  var photos = readTable_('Photos').rows.map(photoOut_);
-  var names = {};
-  readTable_('Users').rows.forEach(function (u) { names[normEmail_(u.Email)] = str_(u.Name) || str_(u.Email); });
+/**
+ * Build a Google Doc from the layout spec (SolarLogic.buildReportSpec), export PDF + Word into "Solar Reports",
+ * then trash the temporary Doc. Each block = a boxed table: grey title row + a borderless grid of photos.
+ */
+function renderReport_(name, spec, photos) {
+  var folder = DriveApp.getFolderById(settings_().ReportsFolderID);
+  var byId = {};
+  photos.forEach(function (p) { byId[p.PhotoID] = p; });
+  var doc = DocumentApp.create(name);
+  var docFile = DriveApp.getFileById(doc.getId());
   try {
-    var doc = DocumentApp.openById(copy.getId());
     var body = doc.getBody();
-    var generated = Utilities.formatDate(new Date(), TZ, 'dd/MM/yyyy HH:mm');
-    [body, doc.getHeader(), doc.getFooter()].forEach(function (sec) {
-      if (!sec) return;
-      sec.replaceText('\\{\\{PROJECT\\}\\}', s.ProjectName);
-      sec.replaceText('\\{\\{GENERATED\\}\\}', generated);
-      sec.replaceText('\\{\\{USER\\}\\}', user.name);
-      sec.replaceText('\\{\\{REPORTID\\}\\}', reportId);
-    });
-    var found = body.findText('\\{\\{CONTENT\\}\\}');
-    var idx;
-    if (found) {
-      var para = found.getElement().getParent();
-      idx = body.getChildIndex(para);
-      para.asParagraph().setText('');
-    } else {
-      // template has no {{CONTENT}}: add an empty paragraph at the end and insert before it
-      idx = body.getChildIndex(body.appendParagraph(''));
-    }
-    ids.forEach(function (id, n) {
-      var pole = getPole_(poles, id);
-      if (n > 0) body.insertPageBreak(idx++);
-      var h = body.insertParagraph(idx++, s.ProjectName);
-      h.setHeading(DocumentApp.ParagraphHeading.HEADING3);
-      var info = body.insertTable(idx++, [
-        ['Tiang', pole.PoleID, 'Bound', str_(pole.Bound)],
-        ['Chainage', str_(pole.Chainage), 'Status kerja', SolarLogic.workStatus(poleOut_(pole), photos)]
-      ]);
-      info.setBorderWidth(1);
-      var cells = [];
-      slots.forEach(function (slot) { cells.push(slot); });
-      var rowsData = [];
-      for (var i = 0; i < cells.length; i += 2) rowsData.push(['', '']);
-      var grid = body.insertTable(idx++, rowsData);
+    var m = spec.page.margin;
+    body.setPageWidth(spec.page.w).setPageHeight(spec.page.h);
+    body.setMarginTop(m).setMarginBottom(m).setMarginLeft(m).setMarginRight(m);
+    var width = spec.page.w - 2 * m;
+    var CENTER = DocumentApp.HorizontalAlignment.CENTER;
+    var first = body.getChild(0).asParagraph();
+    first.editAsText().setFontSize(2);
+    spec.blocks.forEach(function (blk, bi) {
+      if (blk.pageBreakBefore) body.appendPageBreak();
+      else if (bi > 0) body.appendParagraph('').editAsText().setFontSize(6);
+      var outer = body.appendTable([[blk.title], ['']]);
+      outer.setBorderWidth(1);
+      outer.setColumnWidth(0, width);
+      var titleCell = outer.getRow(0).getCell(0);
+      titleCell.setBackgroundColor('#D9D9D9');
+      var tp = titleCell.getChild(0).asParagraph();
+      tp.setAlignment(CENTER);
+      tp.editAsText().setBold(true).setFontSize(10);
+      var cell = outer.getRow(1).getCell(0);
+      cell.getChild(0).asParagraph().editAsText().setFontSize(2);
+      var rows = [];
+      for (var i = 0; i < blk.cells.length; i += blk.columns) {
+        var r = [];
+        for (var k = 0; k < blk.columns; k++) r.push('');
+        rows.push(r);
+      }
+      var grid = cell.appendTable(rows);
       grid.setBorderWidth(0);
-      cells.forEach(function (slot, k) {
-        var cell = grid.getRow(Math.floor(k / 2)).getCell(k % 2);
-        var photo = SolarLogic.reportPhotoForSlot(pole.PoleID, slot.SlotID, photos);
-        var first = cell.getChild(0).asParagraph();
+      for (var c = 0; c < blk.columns; c++) grid.setColumnWidth(c, Math.floor((width - 12) / blk.columns));
+      blk.cells.forEach(function (x, idx) {
+        var gc = grid.getRow(Math.floor(idx / blk.columns)).getCell(idx % blk.columns);
+        var p0 = gc.getChild(0).asParagraph();
+        p0.setAlignment(CENTER);
+        var photo = x.photoId ? byId[x.photoId] : null;
         if (photo) {
-          var img = first.appendInlineImage(DriveApp.getFileById(photo.DriveFileID).getBlob());
-          var w = img.getWidth(), hgt = img.getHeight();
-          var scale = Math.min(215 / w, 250 / hgt, 1);
-          img.setWidth(Math.round(w * scale)).setHeight(Math.round(hgt * scale));
+          var img = p0.appendInlineImage(DriveApp.getFileById(photo.DriveFileID).getBlob());
+          var f = SolarLogic.fitBox(img.getWidth(), img.getHeight(), blk.box);
+          img.setWidth(f.w).setHeight(f.h);
+        } else {
+          p0.appendText('(tiada gambar)');
         }
-        photoCaption_(slot, photo, names).forEach(function (line, li) {
-          var p;
-          if (li === 0 && !photo) { first.setText(line); p = first; } else { p = cell.appendParagraph(line); }
-          p.editAsText().setFontSize(li === 0 ? 10 : 8).setBold(li === 0);
-        });
+        if (x.caption) {
+          var cp = gc.appendParagraph(x.caption.toUpperCase());
+          cp.setAlignment(CENTER);
+          cp.editAsText().setBold(true).setFontSize(8);
+        }
       });
+      if (blk.rowCaption) {
+        var rc = cell.appendParagraph(blk.rowCaption.toUpperCase());
+        rc.setAlignment(CENTER);
+        rc.editAsText().setBold(true).setFontSize(9);
+      }
+      if (blk.footer) {
+        var fp = cell.appendParagraph(blk.footer); // e.g. "Total pegging : 12 nos" (as written)
+        fp.editAsText().setBold(true).setFontSize(9);
+      }
     });
     doc.saveAndClose();
-    var pdf = folder.createFile(copy.getAs('application/pdf')
-      .setName('Laporan_' + reportId + '_' + ids.join('_').slice(0, 80) + '.pdf'));
-    return pdf;
+    var pdf = folder.createFile(docFile.getAs('application/pdf').setName(name + '.pdf'));
+    var res = UrlFetchApp.fetch('https://docs.google.com/document/d/' + doc.getId() + '/export?format=docx', {
+      headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() }, muteHttpExceptions: true
+    });
+    if (res.getResponseCode() !== 200) throw apiError_('SERVER', 'Gagal membuat fail Word (' + res.getResponseCode() + ').');
+    var docx = folder.createFile(res.getBlob().setName(name + '.docx'));
+    return { pdf: pdf, docx: docx };
   } finally {
-    copy.setTrashed(true);
+    docFile.setTrashed(true);
   }
 }
 
 // =====================================================================
-// One-time setup (run from the Apps Script editor). Safe to run again.
+// One-time setup for a NEW Google Sheet (run from the Apps Script editor). Safe to run again.
 // =====================================================================
 function setup() {
   var ss = ss_();
+  var oldPhotos = ss.getSheetByName('Photos');
+  if (oldPhotos && headerIndex_(oldPhotos, 'SlotID')) {
+    throw new Error('Sheet ini masih format lama (v1). Jalankan migrateV2() dahulu.');
+  }
   Object.keys(SCHEMA).forEach(function (name) {
     var sh = ss.getSheetByName(name) || ss.insertSheet(name);
     var headers = SCHEMA[name];
@@ -858,11 +970,10 @@ function setup() {
   var s = settings_();
   if (!s.PhotosFolderID) setSetting_('PhotosFolderID', DriveApp.createFolder('Solar Photos').getId());
   if (!s.ReportsFolderID) setSetting_('ReportsFolderID', DriveApp.createFolder('Solar Reports').getId());
-  if (!s.TemplateDocID) setSetting_('TemplateDocID', createTemplateDoc_());
 
   var me = { email: normEmail_(Session.getEffectiveUser().getEmail()) };
-  var poles = readTable_('Poles');
   var log = [];
+  var poles = readTable_('Poles');
   if (!poles.rows.length) {
     var now = nowIso_();
     var data = SEED_POLES.map(function (p) {
@@ -872,11 +983,14 @@ function setup() {
     audit_(me, 'Setup', 'Pole', '', 'Import', '', data.length + ' poles');
     log.push(data.length + ' tiang diimport');
   }
-  var slots = readTable_('Slots');
-  if (!slots.rows.length) {
-    SEED_SLOTS.forEach(function (x) { appendObj_(slots, x); });
-    log.push(SEED_SLOTS.length + ' slot dicipta');
-  }
+  var at = readTable_('Activities');
+  SolarLogic.ACTIVITIES.forEach(function (a) {
+    if (!find_(at, 'ActivityID', a.ActivityID)) appendObj_(at, { ActivityID: a.ActivityID, Name: a.Name, Spec: a.Spec });
+  });
+  var tt = readTable_('PhotoTypes');
+  SolarLogic.PHOTO_TYPES.forEach(function (t) {
+    if (!find_(tt, 'TypeID', t.TypeID)) appendObj_(tt, { TypeID: t.TypeID, ActivityID: t.ActivityID, Name: t.Name });
+  });
   var users = readTable_('Users');
   if (!users.rows.length) {
     appendObj_(users, { Email: me.email, Name: 'Admin', Role: 'Admin', Active: true });
@@ -888,19 +1002,150 @@ function setup() {
   return msg;
 }
 
-function createTemplateDoc_() {
-  var doc = DocumentApp.create('Solar Report Template');
-  var body = doc.getBody();
-  body.setMarginTop(36).setMarginBottom(36).setMarginLeft(54).setMarginRight(54);
-  var first = body.getChild(0).asParagraph();
-  first.setText('{{PROJECT}}'); // Paragraph.setText() returns nothing: do not chain
-  first.setHeading(DocumentApp.ParagraphHeading.HEADING2);
-  body.appendParagraph('Laporan Kemajuan Pemasangan Lampu Jalan Solar').setHeading(DocumentApp.ParagraphHeading.HEADING1);
-  body.appendParagraph('No. laporan: {{REPORTID}}    Dijana: {{GENERATED}}    Oleh: {{USER}}');
-  body.appendParagraph('{{CONTENT}}');
-  doc.saveAndClose();
-  var file = DriveApp.getFileById(doc.getId());
-  var reportsId = settings_().ReportsFolderID;
-  if (reportsId) file.moveTo(DriveApp.getFolderById(reportsId));
-  return doc.getId();
+// =====================================================================
+// One-time migration of a v1 Sheet (7 slots, IDs "SL-034") to v2 (activities, IDs "SSL034").
+// Run once from the editor while nobody is using the app. Running it again changes nothing.
+// =====================================================================
+function headerIndex_(sh, name) {
+  var lc = sh.getLastColumn();
+  if (!lc) return 0;
+  var h = sh.getRange(1, 1, 1, lc).getValues()[0].map(function (x) { return str_(x).trim(); });
+  return h.indexOf(name) + 1;
 }
+
+/** Apply fn to every data cell of one column; returns how many cells changed. */
+function mapColumn_(sh, header, fn) {
+  var c = headerIndex_(sh, header);
+  var last = sh.getLastRow();
+  if (!c || last < 2) return 0;
+  var range = sh.getRange(2, c, last - 1, 1);
+  var n = 0;
+  var out = range.getValues().map(function (r) {
+    var v = str_(r[0]).trim();
+    var nv = fn(v);
+    if (nv !== v) n++;
+    return [nv];
+  });
+  if (n) { range.setNumberFormat('@'); range.setValues(out); }
+  return n;
+}
+
+function migrateV2() {
+  var ss = ss_();
+  var done = [];
+  var poles = ss.getSheetByName('Poles');
+  if (!poles) throw new Error('Tab Poles tiada. Untuk Sheet baru, jalankan setup().');
+
+  // 1) Check every pole ID first — stop before changing anything if one is unexpected.
+  var idMap = {};
+  var seenNew = {};
+  var pc = headerIndex_(poles, 'PoleID');
+  if (poles.getLastRow() >= 2) {
+    poles.getRange(2, pc, poles.getLastRow() - 1, 1).getValues().forEach(function (r) {
+      var id = str_(r[0]).trim();
+      if (!id) return;
+      var nid = SolarLogic.poleIdFromLegacy(id);
+      if (!nid) throw new Error('ID tiang tidak dikenali: "' + id + '". Tiada perubahan dibuat.');
+      if (seenNew[nid]) throw new Error('ID tiang berulang selepas tukar: ' + nid + '. Tiada perubahan dibuat.');
+      seenNew[nid] = true;
+      if (nid !== id) idMap[id] = nid;
+    });
+  }
+  var mapId = function (v) { return idMap[v] || v; };
+
+  // 2) Photos: SlotID -> PhotoTypeID (S1..S7 -> A1..C3), SelectedForReport -> ReportOrder (cleared), + MeasurementM
+  var ph = ss.getSheetByName('Photos');
+  if (ph) {
+    var sc = headerIndex_(ph, 'SlotID');
+    if (sc && !headerIndex_(ph, 'PhotoTypeID')) { ph.getRange(1, sc).setValue('PhotoTypeID'); done.push('Photos.SlotID→PhotoTypeID'); }
+    var n = mapColumn_(ph, 'PhotoTypeID', function (v) { return SolarLogic.LEGACY_SLOT_MAP[v] || v; });
+    if (n) done.push(n + ' gambar dipetakan ke jenis baru');
+    var rc = headerIndex_(ph, 'SelectedForReport');
+    if (rc && !headerIndex_(ph, 'ReportOrder')) {
+      mapColumn_(ph, 'SelectedForReport', function () { return ''; });
+      ph.getRange(1, rc).setValue('ReportOrder');
+      done.push('Photos.SelectedForReport→ReportOrder (pilihan lama dikosongkan)');
+    }
+    if (!headerIndex_(ph, 'MeasurementM')) {
+      var mc = ph.getLastColumn() + 1;
+      ph.getRange(1, mc).setNumberFormat('@');
+      ph.getRange(1, mc).setValue('MeasurementM');
+      done.push('Photos.MeasurementM ditambah');
+    }
+  }
+
+  // 3) Pole IDs in every sheet that references a pole (AuditLog history is NOT rewritten)
+  var renamed = 0;
+  renamed += mapColumn_(poles, 'PoleID', mapId);
+  ['Photos', 'Notes', 'WorkPlan'].forEach(function (name) {
+    var sh = ss.getSheetByName(name);
+    if (sh) renamed += mapColumn_(sh, 'PoleID', mapId);
+  });
+  var rep = ss.getSheetByName('Reports');
+  if (rep) {
+    renamed += mapColumn_(rep, 'PoleIDs', function (v) {
+      return v ? v.split(/\s*,\s*/).map(mapId).join(', ') : v;
+    });
+    ['Activity', 'DocxURL'].forEach(function (h) {
+      if (!headerIndex_(rep, h)) {
+        var c = rep.getLastColumn() + 1;
+        rep.getRange(1, c).setNumberFormat('@');
+        rep.getRange(1, c).setValue(h);
+        done.push('Reports.' + h + ' ditambah');
+      }
+    });
+  }
+  if (renamed) done.push(renamed + ' sel ID tiang ditukar');
+
+  // 4) Old Slots tab kept for reference
+  var slots = ss.getSheetByName('Slots');
+  if (slots && !ss.getSheetByName('Slots_old')) { slots.setName('Slots_old'); done.push('Slots→Slots_old'); }
+
+  // 5) Drive: Solar Photos/SL-034 -> SSL034, and files "SL-034_..." -> "SSL034_..."
+  var rootId = '';
+  var st = ss.getSheetByName('Settings');
+  if (st && st.getLastRow() >= 2) {
+    st.getRange(2, 1, st.getLastRow() - 1, 2).getValues().forEach(function (r) { if (str_(r[0]) === 'PhotosFolderID') rootId = str_(r[1]); });
+  }
+  if (rootId) {
+    var root = DriveApp.getFolderById(rootId);
+    var folders = [];
+    var it = root.getFolders();
+    while (it.hasNext()) folders.push(it.next());
+    folders.forEach(function (f) {
+      var nid = SolarLogic.poleIdFromLegacy(f.getName());
+      var target = f;
+      if (nid && nid !== f.getName()) {
+        var ex = root.getFoldersByName(nid);
+        if (ex.hasNext()) {           // target already exists: move files across, trash the old folder
+          target = ex.next();
+          var fi = f.getFiles();
+          while (fi.hasNext()) fi.next().moveTo(target);
+          f.setTrashed(true);
+        } else {
+          f.setName(nid);
+        }
+        done.push('Folder ' + nid);
+      }
+      var files = target.getFiles();
+      while (files.hasNext()) {
+        var file = files.next();
+        var mm = file.getName().match(/^SL-(\d{3})_(.*)$/);
+        if (mm) { file.setName('SSL' + mm[1] + '_' + mm[2]); done.push('Fail ' + file.getName()); }
+      }
+    });
+  }
+
+  // 6) New tabs, defaults, activity/type names
+  setup();
+
+  var summary = done.length ? done.length + ' perubahan' : 'tiada perubahan (sudah dimigrasi)';
+  if (done.length) {
+    var me = { email: normEmail_(Session.getEffectiveUser().getEmail()) };
+    audit_(me, 'MigrationV2', 'Sheet', '', 'v1→v2', '', Object.keys(idMap).length + ' tiang; ' + done.slice(0, 20).join('; '));
+  }
+  var msg = 'migrateV2 selesai: ' + summary + '.';
+  console.log(msg + (done.length ? '\n' + done.join('\n') : ''));
+  return msg;
+}
+

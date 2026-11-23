@@ -24,6 +24,9 @@ class Blob {
   setName(n) { this.name = n; return this; }
 }
 
+let dummySeedCache = null;
+function dummySeed() { return dummySeedCache || (dummySeedCache = require('./fixtures/dummy-data').dummySeedGs()); }
+
 function makeIter(arr) { let i = 0; return { hasNext: () => i < arr.length, next: () => arr[i++] }; }
 
 function createRuntime(opts) {
@@ -60,6 +63,7 @@ function createRuntime(opts) {
   class Sheet {
     constructor(name) { this.name = name; this.data = []; this.frozen = 0; }
     getName() { return this.name; }
+    setName(n) { delete state.sheets[this.name]; this.name = n; state.sheets[n] = this; return this; }
     getLastRow() {
       for (let i = this.data.length - 1; i >= 0; i--) if ((this.data[i] || []).some((v) => v !== '' && v !== undefined && v !== null)) return i + 1;
       return 0;
@@ -88,6 +92,7 @@ function createRuntime(opts) {
     getName() { return this.name; }
     getUrl() { return 'https://drive.google.com/file/d/' + this.id + '/view'; }
     getBlob() { return new Blob(this.buf, this.mime, this.name); }
+    setName(n) { this.name = n; return this; }
     setTrashed(t) { this.trashed = !!t; return this; }
     moveTo(folder) { this.parent = folder.id; return this; }
     makeCopy(name, folder) {
@@ -98,6 +103,7 @@ function createRuntime(opts) {
     }
     getAs(mime) {
       if (mime === 'application/pdf' && state.docs[this.id]) {
+        if (!state.docs[this.id].saved) throw new Error('Doc exported before saveAndClose()');
         return new Blob(Buffer.from('%PDF-MOCK\n' + JSON.stringify(state.docs[this.id])), 'application/pdf', this.name + '.pdf');
       }
       throw new Error('getAs not supported for ' + this.mime);
@@ -107,10 +113,13 @@ function createRuntime(opts) {
     constructor(id, name, parent) { Object.assign(this, { id, name, parent }); }
     getId() { return this.id; }
     getName() { return this.name; }
-    getFoldersByName(n) { return makeIter(Object.values(state.folders).filter((f) => f.parent === this.id && f.name === n)); }
+    getFoldersByName(n) { return makeIter(Object.values(state.folders).filter((f) => f.parent === this.id && f.name === n && !f.trashed)); }
     createFolder(n) { const id = nextId('D'); return (state.folders[id] = new Folder(id, n, this.id)); }
     createFile(blob) { const id = nextId('F'); return (state.files[id] = new File(id, blob.name, blob.mime, Buffer.from(blob.buf), this.id)); }
     getFiles() { return makeIter(Object.values(state.files).filter((f) => f.parent === this.id && !f.trashed)); }
+    getFolders() { return makeIter(Object.values(state.folders).filter((f) => f.parent === this.id && !f.trashed)); }
+    setName(n) { this.name = n; return this; }
+    setTrashed(t) { this.trashed = !!t; return this; }
   }
   const rootFolder = new Folder('ROOT', 'My Drive', null);
   state.folders.ROOT = rootFolder;
@@ -120,20 +129,18 @@ function createRuntime(opts) {
     getFileById: (id) => { if (!state.files[id]) throw new Error('No file ' + id); return state.files[id]; },
   };
 
-  // ---------------- Documents (records structure; "PDF" = JSON of it) ----------------
-  // STRICT: any Docs method not implemented here throws, so the backend can only use methods
-  // whose real return values we have copied (e.g. Paragraph.setText returns nothing).
-  function chain(target) {
+  // ---------------- Documents (records the structure; "PDF"/"DOCX" = JSON of it) ----------------
+  // STRICT: any method not implemented here throws, so Code.gs can only use methods whose real
+  // return values are copied here (e.g. Paragraph.setText returns nothing).
+  function strict(target, what) {
     return new Proxy(target, {
       get(t, k) {
         if (k in t || typeof k === 'symbol' || k === 'then' || k === 'toJSON') return t[k];
-        throw new Error('Docs mock: method "' + String(k) + '" not implemented — check the real Apps Script API');
+        throw new Error('Docs mock: ' + what + '.' + String(k) + '() not implemented — check the real Apps Script API');
       },
     });
   }
-  const textObj = () => { const o = chain({ setFontSize: () => o, setBold: () => o }); return o; };
   function jpegSize(buf) {
-    // minimal SOF parser so InlineImage reports real width/height
     let i = 2;
     while (i < buf.length) {
       if (buf[i] !== 0xff) { i++; continue; }
@@ -143,86 +150,80 @@ function createRuntime(opts) {
     }
     return { w: 1600, h: 1200 };
   }
-  function makeParagraph(store, text) {
-    const node = { type: 'p', text: text || '', images: [] };
-    store.push(node);
-    return wrapParagraph(node);
-  }
+  const textObj = (node) => { const o = strict({ setFontSize: (n) => { node.size = n; return o; }, setBold: (v) => { node.bold = v; return o; } }, 'Text'); return o; };
   function wrapParagraph(node) {
-    const p = chain({
+    const p = strict({
       _node: node,
-      setText(t) { node.text = t; return undefined; }, // real API returns void
+      setText(t) { node.text = t; node.images = []; return undefined; }, // real API returns void
       getText() { return node.text; },
+      appendText(t) { node.text += t; return textObj(node); },
       setHeading(h) { node.heading = h; return p; },
+      setAlignment(a) { node.align = a; return p; },
       asParagraph() { return p; },
-      editAsText() { return textObj(); },
+      editAsText() { return textObj(node); },
       appendInlineImage(blob) {
         const sz = blob.buf[0] === 0xff ? jpegSize(blob.buf) : { w: 1600, h: 1200 };
-        const img = { name: blob.name, w: sz.w, h: sz.h };
+        const img = { name: blob.name, w: sz.w, h: sz.h, natural: { w: sz.w, h: sz.h } };
         node.images.push(img);
-        const ii = chain({
+        const ii = strict({
           getWidth: () => img.w, getHeight: () => img.h,
           setWidth(w) { img.w = w; return ii; }, setHeight(h) { img.h = h; return ii; },
-        });
+        }, 'InlineImage');
         return ii;
       },
-    });
+    }, 'Paragraph');
     return p;
   }
-  function wrapBody(doc) {
-    const children = doc.body;
-    const body = chain({
-      getNumChildren: () => children.length,
-      getChild: (i) => wrapParagraph(children[i]),
-      getChildIndex: (p) => children.indexOf(p._node),
-      appendParagraph: (t) => makeParagraph(children, t),
-      insertParagraph(i, t) { const n = { type: 'p', text: t, images: [] }; children.splice(i, 0, n); return wrapParagraph(n); },
-      insertPageBreak(i) { children.splice(i, 0, { type: 'pagebreak' }); return chain({}); },
-      setMarginTop() { return body; }, setMarginBottom() { return body; }, setMarginLeft() { return body; }, setMarginRight() { return body; },
-      insertTable(i, cells) {
-        const n = { type: 'table', rows: cells.map((r) => r.map((c) => ({ paras: [{ type: 'p', text: c, images: [] }] }))) };
-        children.splice(i, 0, n);
-        const tbl = chain({
-          setBorderWidth: () => tbl,
-          getRow: (ri) => chain({
-            getCell: (ci) => {
-              const cell = n.rows[ri][ci];
-              return chain({ getChild: (k) => wrapParagraph(cell.paras[k]), appendParagraph: (t) => makeParagraph(cell.paras, t) });
-            },
-          }),
-        });
-        return tbl;
-      },
-      replaceText(pat, rep) {
-        const re = new RegExp(pat, 'g');
-        const walk = (n) => { if (n.type === 'p') n.text = n.text.replace(re, rep); if (n.type === 'table') n.rows.forEach((r) => r.forEach((c) => c.paras.forEach(walk))); };
-        children.forEach(walk);
-        return body;
-      },
-      findText(pat) {
-        const re = new RegExp(pat);
-        const n = children.find((c) => c.type === 'p' && re.test(c.text));
-        if (!n) return null;
-        return { getElement: () => ({ getParent: () => wrapParagraph(n) }) };
-      },
-    });
+  const newPara = (t) => ({ type: 'p', text: t || '', images: [] });
+  function wrapTable(n) {
+    const tbl = strict({
+      setBorderWidth(w) { n.border = w; return tbl; },
+      setColumnWidth(i, w) { (n.colWidths = n.colWidths || [])[i] = w; return tbl; },
+      getNumRows: () => n.rows.length,
+      getRow: (ri) => strict({ getCell: (ci) => wrapContainer(n.rows[ri][ci], 'TableCell') }, 'TableRow'),
+    }, 'Table');
+    return tbl;
+  }
+  function makeTable(cells) {
+    return { type: 'table', border: 1, rows: cells.map((r) => r.map((c) => ({ children: [newPara(c)] }))) };
+  }
+  /** Body or TableCell */
+  function wrapContainer(holder, kind) {
+    const ch = holder.children;
+    const api = {
+      getNumChildren: () => ch.length,
+      getChild: (i) => (ch[i].type === 'table' ? wrapTable(ch[i]) : wrapParagraph(ch[i])),
+      getChildIndex: (el) => ch.indexOf(el._node),
+      appendParagraph: (t) => { const n = newPara(t); ch.push(n); return wrapParagraph(n); },
+      appendTable: (cells) => { const n = makeTable(cells); ch.push(n); if (kind === 'TableCell') ch.push(newPara('')); return wrapTable(n); },
+    };
+    if (kind === 'TableCell') {
+      api.setBackgroundColor = (c) => { holder.bg = c; return wrapContainer(holder, kind); };
+    } else {
+      const self = () => body;
+      api.appendPageBreak = () => { ch.push({ type: 'pagebreak' }); return strict({}, 'PageBreak'); };
+      ['setMarginTop', 'setMarginBottom', 'setMarginLeft', 'setMarginRight'].forEach((k) => { api[k] = (v) => { holder[k] = v; return self(); }; });
+      api.setPageWidth = (v) => { holder.pageWidth = v; return self(); };
+      api.setPageHeight = (v) => { holder.pageHeight = v; return self(); };
+    }
+    const body = strict(api, kind);
     return body;
   }
   const DocumentApp = {
     ParagraphHeading: { HEADING1: 'H1', HEADING2: 'H2', HEADING3: 'H3' },
+    HorizontalAlignment: { LEFT: 'LEFT', CENTER: 'CENTER', RIGHT: 'RIGHT' },
     create(name) {
       const id = nextId('F');
       state.files[id] = new File(id, name, 'application/vnd.google-apps.document', Buffer.alloc(0), 'ROOT');
-      state.docs[id] = { body: [{ type: 'p', text: '', images: [] }] };
+      state.docs[id] = { children: [newPara('')] };
       return DocumentApp.openById(id);
     },
     openById(id) {
       const doc = state.docs[id];
       if (!doc) throw new Error('No doc ' + id);
-      return chain({ getId: () => id, getBody: () => wrapBody(doc), getHeader: () => null, getFooter: () => null, saveAndClose() {} });
+      return strict({ getId: () => id, getBody: () => wrapContainer(doc, 'Body'), saveAndClose() { doc.saved = true; } }, 'Document');
     },
   };
-
   // ---------------- Utilities etc ----------------
   const pad = (n, l) => String(n).padStart(l || 2, '0');
   const Utilities = {
@@ -257,26 +258,34 @@ function createRuntime(opts) {
   };
   const UrlFetchApp = {
     fetch(url, o) {
+      const ex = url.match(/^https:\/\/docs\.google\.com\/document\/d\/([^/]+)\/export\?format=docx$/);
+      if (ex) {
+        if (!o || !o.headers || o.headers.Authorization !== 'Bearer mock-oauth-token') return { getResponseCode: () => 401, getContentText: () => '', getBlob: () => null };
+        const doc = state.docs[ex[1]];
+        if (!doc || !doc.saved) return { getResponseCode: () => 404, getContentText: () => '', getBlob: () => null };
+        const buf = Buffer.from('DOCX-MOCK\n' + JSON.stringify(doc));
+        return { getResponseCode: () => 200, getContentText: () => buf.toString(), getBlob: () => new Blob(buf, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'export.docx') };
+      }
       if (!state.urlFetch) throw new Error('UrlFetchApp not mocked');
       const r = state.urlFetch(url, o);
       return { getResponseCode: () => r.code, getContentText: () => r.body };
     },
   };
+  const ScriptApp = { getOAuthToken: () => 'mock-oauth-token' };
   const Session = { getEffectiveUser: () => ({ getEmail: () => state.ownerEmail }) };
 
   const sandbox = {
     SpreadsheetApp: { getActiveSpreadsheet: () => spreadsheet },
-    DriveApp, DocumentApp, Utilities, PropertiesService, LockService, ContentService, HtmlService, UrlFetchApp, Session,
+    DriveApp, DocumentApp, ScriptApp, Utilities, PropertiesService, LockService, ContentService, HtmlService, UrlFetchApp, Session,
     console: { log() {}, error: (...a) => (opts.verbose ? console.error(...a) : undefined) },
     Logger: { log() {} },
   };
   vm.createContext(sandbox);
   const dir = path.join(__dirname, '..', 'apps-script');
   // Load in the "wrong" order on purpose (Code.gs first), like a fresh Apps Script project could.
-  if (!fs.existsSync(path.join(dir, 'SeedData.gs'))) {
-    throw new Error('apps-script/SeedData.gs missing. Put the xlsx in data/ and run: npm run import');
-  }
-  ['Code.gs', 'Logic.gs', 'SeedData.gs'].forEach((f) => vm.runInContext(fs.readFileSync(path.join(dir, f), 'utf8'), sandbox, { filename: f }));
+  ['Code.gs', 'Logic.gs'].forEach((f) => vm.runInContext(fs.readFileSync(path.join(dir, f), 'utf8'), sandbox, { filename: f }));
+  // Tests use DUMMY poles (tests/fixtures/dummy-data.js), never the private SeedData.gs.
+  vm.runInContext(opts.seedGs || dummySeed(), sandbox, { filename: 'SeedData.gs' });
   return { g: sandbox, state, Blob };
 }
 
