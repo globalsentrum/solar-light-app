@@ -3,7 +3,7 @@
  * VERSION is stamped by `npm run build` so phones pick up new versions automatically.
  * API calls (Apps Script) and Google sign-in are never cached here — data lives in IndexedDB.
  */
-const VERSION = '8dbf6b6d00';
+const VERSION = '1eeb4c9ca7';
 const CACHE = 'solar-shell-' + VERSION;
 const SHELL = [
   './', 'index.html', 'css/app.css', 'js/config.js', 'js/logic.js', 'js/db.js', 'js/api.js', 'js/watermark.js',

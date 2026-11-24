@@ -15,7 +15,17 @@ var SolarLogic = (function () {
   var CATEGORY = { INSTALLED: 'Sudah dipasang', TODO: 'Perlu pasang', PENDING: 'Tunggu kelulusan' };
   var CATEGORIES = [CATEGORY.TODO, CATEGORY.PENDING, CATEGORY.INSTALLED];
   var WORK = { NOT_STARTED: 'Belum mula', IN_PROGRESS: 'Dalam proses', DONE: 'Siap', PENDING: 'Tunggu kelulusan' };
-  var ROLES = ['Admin', 'Team', 'Boss'];
+  var ADMIN_ROLE = 'Admin';
+  var LABEL_MAX = 20;
+  /** Display labels, stored by key (Settings "Label.<key>"); data always uses the keys / internal values. */
+  var LABEL_DEFAULTS = {
+    NOT_STARTED: 'Belum mula', IN_PROGRESS: 'Dalam proses', DONE: 'Siap', NIGHT: 'Perlu gambar malam',
+    PENDING: 'Tunggu kelulusan', INSTALLED: 'Sudah dipasang', BAKI: 'Baki perlu pasang'
+  };
+  var WORK_KEY = { 'Belum mula': 'NOT_STARTED', 'Dalam proses': 'IN_PROGRESS', 'Siap': 'DONE', 'Tunggu kelulusan': 'PENDING' };
+  var OVERRIDES = { NOT_STARTED: 'Belum mula', IN_PROGRESS: 'Dalam proses', DONE: 'Siap' };
+  /** RIN column in the Poles sheet per activity. */
+  var RIN_FIELD = { A: 'RINPegging', B: 'RINTrialPit', C: 'RINInstallation' };
   var WORK_AREA_TO_CATEGORY = { 'installed': CATEGORY.INSTALLED, 'non-widening': CATEGORY.TODO, 'widening': CATEGORY.PENDING };
 
   /*
@@ -35,10 +45,11 @@ var SolarLogic = (function () {
     { TypeID: 'B3', ActivityID: 'B', Order: 4, Name: 'Panjang', MinPhotos: 1, ReportCount: 1, NeedsMeasurement: true, MeasureLabel: 'LENGTH' },
     { TypeID: 'B4', ActivityID: 'B', Order: 5, Name: 'Dalam', MinPhotos: 1, ReportCount: 1, NeedsMeasurement: true, MeasureLabel: 'DEPTH' },
     { TypeID: 'C1', ActivityID: 'C', Order: 6, Name: 'Progress pemasangan', MinPhotos: 4, ReportCount: 4, NeedsMeasurement: false, MeasureLabel: '' },
-    { TypeID: 'C2', ActivityID: 'C', Order: 7, Name: 'Siap dipasang (siang)', MinPhotos: 1, ReportCount: 1, NeedsMeasurement: false, MeasureLabel: '' },
+    { TypeID: 'C2', ActivityID: 'C', Order: 7, Name: 'Siap pasang (siang)', MinPhotos: 1, ReportCount: 1, NeedsMeasurement: false, MeasureLabel: '' },
     { TypeID: 'C3', ActivityID: 'C', Order: 8, Name: 'Ujian lampu (malam)', MinPhotos: 1, ReportCount: 1, NeedsMeasurement: false, MeasureLabel: '' }
   ];
   /** Old v1 slot -> new photo type (used once by migrateV2). S3 "Ukuran" -> B2 without a measurement. */
+  var OLD_C2_NAME = 'Siap dipasang (siang)'; // v2 default (21 chars) -> shortened by migrateV3 if unchanged
   var LEGACY_SLOT_MAP = { S1: 'A1', S2: 'B1', S3: 'B2', S4: 'C1', S5: 'C1', S6: 'C2', S7: 'C3' };
 
   // ---------- small helpers ----------
@@ -59,6 +70,16 @@ var SolarLogic = (function () {
     var m = s.match(/^SL-(\d{3})$/);
     return m ? 'SSL' + m[1] : null;
   }
+  /** Pole ID typed by admin: trimmed, 1-20 chars, letters/digits/space . _ - (no comma or slash). */
+  function validatePoleId(id) {
+    var s = String(id == null ? '' : id).trim().replace(/\s+/g, ' ');
+    if (!s) return { ok: false, error: 'ID tiang tidak boleh kosong.' };
+    if (s.length > 20) return { ok: false, error: 'ID tiang maksimum 20 aksara.' };
+    if (!/^[A-Za-z0-9][A-Za-z0-9 ._-]*$/.test(s)) return { ok: false, error: 'ID tiang hanya boleh mengandungi huruf, nombor, ruang, titik, - dan _.' };
+    return { ok: true, id: s };
+  }
+  function sameId(a, b) { return String(a == null ? '' : a).trim().toUpperCase() === String(b == null ? '' : b).trim().toUpperCase(); }
+
   /** Search: "SSL034", "ssl34", "34", "034", "SL-034" all find SSL034. */
   function poleMatchesQuery(id, q) {
     var query = String(q == null ? '' : q).toUpperCase().replace(/[^A-Z0-9]/g, '');
@@ -197,43 +218,82 @@ var SolarLogic = (function () {
   function workStatus(pole, photos) {
     if (pole.Category === CATEGORY.INSTALLED) return WORK.DONE;
     if (pole.Category === CATEGORY.PENDING) return WORK.PENDING;
+    var ov = String(pole.StatusOverride || '').trim();
+    if (OVERRIDES[ov]) return OVERRIDES[ov];
     if (bool(pole.IsDone)) return WORK.DONE;
     return visiblePhotosOf(pole.PoleID, photos).length ? WORK.IN_PROGRESS : WORK.NOT_STARTED;
+  }
+  function workKey(ws) { return WORK_KEY[ws] || ''; }
+  function isActive(pole) { return pole.Active === undefined || pole.Active === '' || bool(pole.Active); }
+
+  /** "Perlu gambar malam": Perlu pasang pole that is Siap but has no visible, non-flagged night (C3) photo. */
+  function needsNightPhoto(pole, photos) {
+    if (pole.Category !== CATEGORY.TODO || workStatus(pole, photos) !== WORK.DONE) return false;
+    return !visiblePhotosOf(pole.PoleID, photos).some(function (p) { return p.PhotoTypeID === 'C3' && !bool(p.RetakeFlag); });
   }
 
   function hasRetakeFlag(poleId, photos) {
     return visiblePhotosOf(poleId, photos).some(function (p) { return bool(p.RetakeFlag); });
   }
 
-  // ---------- report selection ----------
+  // ---------- report selection (v3) ----------
   /**
-   * Photos used in the report for one pole + type, in report order.
-   *  - Admin choice (ReportOrder 1..n) is used when exactly ReportCount chosen photos are still visible.
-   *  - Otherwise the latest ReportCount good photos, shown oldest -> newest.
+   * State of one photo type for the report:
+   *  - admin choice (ReportOrder 1..n) of exactly ReportCount visible photos -> used ('ok')
+   *  - otherwise exactly ReportCount good photos (visible, not flagged, measured if needed) -> used automatically ('ok')
+   *  - more good photos than needed and no complete choice -> admin must choose ('choose')
+   *  - fewer -> 'short'. A chosen/automatic photo without a needed measurement -> 'short'.
    */
-  function reportPhotos(poleId, typeId, photos) {
+  function typeReportState(poleId, typeId, photos) {
     var t = typeById(typeId);
-    if (!t) return [];
     var list = visiblePhotosOf(poleId, photos).filter(function (p) { return p.PhotoTypeID === typeId; });
     var chosen = list.filter(function (p) { return Number(p.ReportOrder) > 0; })
       .sort(function (a, b) { return Number(a.ReportOrder) - Number(b.ReportOrder); });
-    if (chosen.length === t.ReportCount) return chosen;
     var good = list.filter(function (p) { return isGood(p, t); }).sort(byTime);
-    return good.slice(Math.max(0, good.length - t.ReportCount));
+    var use = null, how = '';
+    if (chosen.length === t.ReportCount) { use = chosen; how = 'admin'; }
+    else if (good.length === t.ReportCount) { use = good; how = 'auto'; }
+    var state;
+    if (use) state = t.NeedsMeasurement && use.some(function (p) { return !hasMeasurement(p); }) ? 'short' : 'ok';
+    else state = good.length > t.ReportCount ? 'choose' : 'short';
+    return { type: t, state: state, how: how, photos: use || [], count: list.length, good: good.length, need: t.ReportCount,
+      noMeasurement: !!use && state === 'short' };
+  }
+  /** Photos used in the report for one pole + type, in report order ([] when not decided / not enough). */
+  function reportPhotos(poleId, typeId, photos) {
+    var st = typeReportState(poleId, typeId, photos);
+    return st.state === 'ok' ? st.photos : [];
   }
   function isAdminChoice(poleId, typeId, photos) {
-    var t = typeById(typeId);
-    var chosen = visiblePhotosOf(poleId, photos).filter(function (p) { return p.PhotoTypeID === typeId && Number(p.ReportOrder) > 0; });
-    return !!t && chosen.length === t.ReportCount;
+    return typeReportState(poleId, typeId, photos).how === 'admin';
   }
+  function hasRin(pole, activityId) { return String(pole[RIN_FIELD[activityId]] || '').trim() !== ''; }
 
-  /** What is missing for this pole in the report of one activity ([] = ready). */
+  /**
+   * Report row status for one pole + activity:
+   *  'reported' (RIN recorded) · 'short' (Kurang gambar) · 'choose' (Perlu pilih gambar) · 'ready' (Sedia).
+   * ready = every type ok (also true for a reported pole whose photos are complete).
+   */
+  function poleReportStatus(activityId, pole, types, photos) {
+    var states = typesOfActivity(types || photoTypes(), activityId).map(function (t) { return typeReportState(pole.PoleID, t.TypeID, photos); });
+    var hasPhotos = visiblePhotosOf(pole.PoleID, photos).some(function (p) {
+      var t = typeById(p.PhotoTypeID); return t && t.ActivityID === activityId;
+    });
+    var short = states.filter(function (x) { return x.state === 'short'; });
+    var choose = states.filter(function (x) { return x.state === 'choose'; });
+    var ready = !short.length && !choose.length;
+    var status = hasRin(pole, activityId) ? 'reported' : short.length ? 'short' : choose.length ? 'choose' : 'ready';
+    return { status: status, ready: ready, hasPhotos: hasPhotos, types: states, short: short, choose: choose,
+      rin: String(pole[RIN_FIELD[activityId]] || '') };
+  }
+  /** Text list of what blocks the report for this pole ([] = Sedia). */
   function reportMissing(activityId, poleId, types, photos) {
     var out = [];
     typesOfActivity(types, activityId).forEach(function (t) {
-      var ps = reportPhotos(poleId, t.TypeID, photos);
-      if (ps.length < t.ReportCount) out.push(t.Name + ' (' + ps.length + '/' + t.ReportCount + ' gambar)');
-      else if (t.NeedsMeasurement && ps.some(function (p) { return !hasMeasurement(p); })) out.push(t.Name + ' (tiada ukuran)');
+      var st = typeReportState(poleId, t.TypeID, photos);
+      var name = (types.filter(function (x) { return x.TypeID === t.TypeID; })[0] || t).Name;
+      if (st.state === 'choose') out.push(name + ': pilih ' + t.ReportCount + ' daripada ' + st.good + ' gambar');
+      else if (st.state === 'short') out.push(st.noMeasurement ? name + ' (tiada ukuran)' : name + ' (' + st.good + '/' + t.ReportCount + ' gambar)');
     });
     return out;
   }
@@ -323,19 +383,22 @@ var SolarLogic = (function () {
     });
   }
 
+  /** Dashboard (active poles only). siap + belumMula + dalamProses + tunggu = total; belumMula + dalamProses = baki. */
   function dashboard(poles, types, photos, acts) {
-    var r = { total: poles.length, done: 0, photoComplete: 0, photoRequired: 0, todo: 0, pending: 0, installed: 0,
-      inProgress: 0, notStarted: 0, bound: { EB: { total: 0, done: 0 }, WB: { total: 0, done: 0 } },
-      incomplete: [], retake: [], chInexact: [] };
-    poles.forEach(function (p) {
+    var act = poles.filter(isActive);
+    var r = { total: act.length, done: 0, todo: 0, baki: 0, pending: 0, installed: 0, inProgress: 0, notStarted: 0, night: 0,
+      photoComplete: 0, photoRequired: 0, bound: { EB: { total: 0, done: 0 }, WB: { total: 0, done: 0 } },
+      incomplete: [], retake: [], chInexact: [], nightList: [] };
+    act.forEach(function (p) {
       var ws = workStatus(p, photos);
-      var ps = photoStatus(p, types, photos, acts);
       if (ws === WORK.DONE) r.done++;
       if (ws === WORK.IN_PROGRESS) r.inProgress++;
       if (ws === WORK.NOT_STARTED) r.notStarted++;
-      if (p.Category === CATEGORY.TODO) r.todo++;
-      if (p.Category === CATEGORY.PENDING) r.pending++;
+      if (ws === WORK.PENDING) r.pending++;
+      if (p.Category === CATEGORY.TODO) { r.todo++; if (ws !== WORK.DONE) r.baki++; }
       if (p.Category === CATEGORY.INSTALLED) r.installed++;
+      if (needsNightPhoto(p, photos)) { r.night++; r.nightList.push(p.PoleID); }
+      var ps = photoStatus(p, types, photos, acts);
       if (ps.required) {
         r.photoRequired++;
         if (ps.complete) r.photoComplete++;
@@ -350,39 +413,154 @@ var SolarLogic = (function () {
     return r;
   }
 
-  // ---------- permissions (backend calls this for EVERY action) ----------
-  var PERMS = {
-    view: ['Admin', 'Team', 'Boss'],
-    viewPhotos: ['Admin', 'Team', 'Boss'],
-    downloadReport: ['Admin', 'Team', 'Boss'],
-    uploadPhoto: ['Admin', 'Team'],
-    addNote: ['Admin', 'Team'],
-    setDone: ['Admin', 'Team'],
-    editPole: ['Admin'],
-    setCategory: ['Admin'],
-    flagRetake: ['Admin'],
-    hidePhoto: ['Admin'],
-    selectReport: ['Admin'],
-    generateReport: ['Admin'],
-    planWork: ['Admin'],
-    manageUsers: ['Admin'],
-    manageTypes: ['Admin'],
-    viewAudit: ['Admin'],
-    viewHidden: ['Admin']
-  };
-  function can(role, action) { var a = PERMS[action]; return !!a && a.indexOf(role) !== -1; }
-  function denyReason(role, action, pole) {
-    if (!can(role, action)) return 'Anda tiada kebenaran untuk tindakan ini.';
+  /** Schedule / dashboard filter keys -> does the pole match? (dashboard cards open exactly these lists) */
+  function matchesFilter(pole, key, photos) {
+    if (!key || key === 'all') return true;
+    var ws = workStatus(pole, photos);
+    switch (key) {
+      case 'BAKI': return pole.Category === CATEGORY.TODO && ws !== WORK.DONE;
+      case 'NIGHT': return needsNightPhoto(pole, photos);
+      case 'TODO': return pole.Category === CATEGORY.TODO;
+      case 'NOT_STARTED': return ws === WORK.NOT_STARTED;
+      case 'IN_PROGRESS': return ws === WORK.IN_PROGRESS;
+      case 'DONE': return ws === WORK.DONE;
+      case 'PENDING': return ws === WORK.PENDING;
+      default: return false;
+    }
+  }
+
+  // ---------- labels ----------
+  /** Settings rows/object -> {key: label}; values over 20 chars or empty fall back to the default. */
+  function labels(settings) {
+    var out = {};
+    Object.keys(LABEL_DEFAULTS).forEach(function (k) {
+      var v = settings ? settings['Label.' + k] : '';
+      v = String(v == null ? '' : v).trim();
+      out[k] = v && v.length <= LABEL_MAX ? v : LABEL_DEFAULTS[k];
+    });
+    return out;
+  }
+  function validateLabel(v) {
+    var s = String(v == null ? '' : v).trim();
+    if (!s) return { ok: false, error: 'Label tidak boleh kosong.' };
+    if (s.length > LABEL_MAX) return { ok: false, error: 'Maksimum ' + LABEL_MAX + ' aksara (' + s.length + ').' };
+    return { ok: true, value: s };
+  }
+
+  // ---------- work plan dates ----------
+  /** Next plan date for a pole that is today or later ('' = Belum dirancang). */
+  function nextPlanDate(plans, poleId, today) {
+    var best = '';
+    (plans || []).forEach(function (p) {
+      if (sameId(p.PoleID, poleId) && p.Date >= today && (!best || p.Date < best)) best = p.Date;
+    });
+    return best;
+  }
+  /** Activity value for plans: '', 'A', 'B', 'C' or 'C3' (Ujian lampu malam). */
+  var PLAN_ACTIVITIES = ['A', 'B', 'C', 'C3'];
+
+  // ---------- import rows (shared by phone preview and backend) ----------
+  var CATEGORY_ALIASES = { 'perlu pasang': CATEGORY.TODO, 'non-widening': CATEGORY.TODO, 'tunggu kelulusan': CATEGORY.PENDING,
+    'widening': CATEGORY.PENDING, 'sudah dipasang': CATEGORY.INSTALLED, 'installed': CATEGORY.INSTALLED };
+  /**
+   * rows: [{PoleID, Chainage, Bound, Category}] ; existing: poles in the sheet.
+   * Each result: {row, PoleID, Chainage, Bound, Category, status: 'new'|'exists'|'error', errors: [], warnings: [], existingId}
+   */
+  function validateImport(rows, existing) {
+    var seen = {};
+    (rows || []).forEach(function (r) {
+      var v = validatePoleId(r.PoleID);
+      if (v.ok) { var k = v.id.toUpperCase(); seen[k] = (seen[k] || 0) + 1; }
+    });
+    return (rows || []).map(function (r, i) {
+      var out = { row: i + 1, errors: [], warnings: [], status: 'new', existingId: '' };
+      var v = validatePoleId(r.PoleID);
+      if (!v.ok) out.errors.push(v.error); else out.PoleID = v.id;
+      if (!out.PoleID) out.PoleID = String(r.PoleID == null ? '' : r.PoleID).trim();
+      out.Chainage = String(r.Chainage == null ? '' : r.Chainage).trim();
+      if (!out.Chainage) out.errors.push('CH kosong.');
+      out.Bound = String(r.Bound == null ? '' : r.Bound).trim().toUpperCase();
+      if (out.Bound !== 'EB' && out.Bound !== 'WB') out.errors.push('Bound mesti EB atau WB.');
+      var c = String(r.Category == null ? '' : r.Category).trim();
+      if (!c) { out.Category = CATEGORY.TODO; out.warnings.push('Kategori kosong → Perlu pasang.'); }
+      else if (CATEGORY_ALIASES[c.toLowerCase()]) out.Category = CATEGORY_ALIASES[c.toLowerCase()];
+      else out.errors.push('Kategori tidak dikenali: ' + c);
+      if (v.ok && seen[v.id.toUpperCase()] > 1) out.errors.push('ID berulang dalam fail.');
+      if (v.ok) {
+        (existing || []).forEach(function (p) { if (sameId(p.PoleID, v.id)) { out.status = 'exists'; out.existingId = p.PoleID; } });
+      }
+      if (!out.errors.length) {
+        (existing || []).forEach(function (p) {
+          if (!sameId(p.PoleID, out.PoleID) && String(p.Chainage).trim() === out.Chainage && p.Bound === out.Bound) {
+            out.warnings.push('CH dan bound sama dengan ' + p.PoleID + '.');
+          }
+        });
+      }
+      if (out.errors.length) out.status = 'error';
+      return out;
+    });
+  }
+
+  // ---------- permissions (roles defined by admin in the Roles sheet; backend checks every action) ----------
+  var PERMISSIONS = [
+    { key: 'view_dashboard', label: 'Lihat dashboard' },
+    { key: 'capture_photo', label: 'Ambil / muat naik gambar' },
+    { key: 'add_note', label: 'Tambah nota' },
+    { key: 'mark_done', label: 'Tanda kerja siap / batal siap' },
+    { key: 'plan_work', label: 'Rancang kerja (pelan)' },
+    { key: 'select_report_photos', label: 'Pilih gambar untuk laporan' },
+    { key: 'generate_report', label: 'Jana laporan' },
+    { key: 'record_rin', label: 'Rekod No. RIN' },
+    { key: 'download_report', label: 'Muat turun laporan' },
+    { key: 'edit_pole', label: 'Edit maklumat tiang' },
+    { key: 'add_pole', label: 'Tambah tiang' },
+    { key: 'delete_pole', label: 'Padam / nyahaktif tiang' },
+    { key: 'import_poles', label: 'Import tiang (Excel/CSV)' },
+    { key: 'export_data', label: 'Eksport data (Excel)' },
+    { key: 'edit_measurement', label: 'Edit ukuran' },
+    { key: 'hide_photo', label: 'Sorok gambar / Ambil semula' },
+    { key: 'delete_photo', label: 'Padam gambar' },
+    { key: 'move_photo', label: 'Pindah / tukar gambar' },
+    { key: 'override_status', label: 'Tukar status kerja (override)' },
+    { key: 'manage_users', label: 'Urus pengguna' },
+    { key: 'manage_roles', label: 'Urus peranan' },
+    { key: 'edit_settings', label: 'Tetapan (label & nama)' },
+    { key: 'view_audit_log', label: 'Lihat log audit' }
+  ];
+  var ALL_PERMISSIONS = PERMISSIONS.map(function (p) { return p.key; });
+  /** v2 roles -> exactly the same powers in v3. */
+  var DEFAULT_ROLES = [
+    { RoleName: 'Admin', Permissions: ALL_PERMISSIONS, BuiltIn: true },
+    { RoleName: 'Team', Permissions: ['view_dashboard', 'capture_photo', 'add_note', 'mark_done', 'download_report'], BuiltIn: false },
+    { RoleName: 'Boss', Permissions: ['view_dashboard', 'download_report'], BuiltIn: false }
+  ];
+  /** "a, b" or array -> clean list of known keys */
+  function parsePermissions(v) {
+    var list = Array.isArray(v) ? v : String(v == null ? '' : v).split(/[\s,;]+/);
+    var out = [];
+    list.forEach(function (k) { k = String(k).trim(); if (ALL_PERMISSIONS.indexOf(k) >= 0 && out.indexOf(k) < 0) out.push(k); });
+    return out;
+  }
+  /** perms: array of keys (the user's role). */
+  function can(perms, key) { return !!perms && perms.indexOf(key) !== -1; }
+  function denyReason(perms, key, pole) {
+    if (!can(perms, key)) return 'Anda tiada kebenaran untuk tindakan ini.';
     if (!pole) return '';
-    if (action === 'uploadPhoto' && pole.Category === CATEGORY.PENDING) return 'Tiang ini masih Tunggu kelulusan — gambar belum boleh diambil.';
-    if (action === 'setDone' && pole.Category !== CATEGORY.TODO) return 'Status Siap hanya untuk tiang kategori Perlu pasang.';
+    if (key === 'capture_photo' && pole.Category === CATEGORY.PENDING) return 'Tiang ini masih Tunggu kelulusan — gambar belum boleh diambil.';
+    if (key === 'mark_done' && pole.Category !== CATEGORY.TODO) return 'Status Siap hanya untuk tiang kategori Perlu pasang.';
+    if ((key === 'capture_photo' || key === 'mark_done' || key === 'add_note') && !isActive(pole)) return 'Tiang ini tidak aktif.';
     return '';
   }
 
   return {
-    CATEGORY: CATEGORY, CATEGORIES: CATEGORIES, WORK: WORK, ROLES: ROLES, PERMS: PERMS,
+    CATEGORY: CATEGORY, CATEGORIES: CATEGORIES, WORK: WORK, ADMIN_ROLE: ADMIN_ROLE, LABEL_MAX: LABEL_MAX,
+    LABEL_DEFAULTS: LABEL_DEFAULTS, OVERRIDES: OVERRIDES, RIN_FIELD: RIN_FIELD, OLD_C2_NAME: OLD_C2_NAME,
+    PERMISSIONS: PERMISSIONS, ALL_PERMISSIONS: ALL_PERMISSIONS, DEFAULT_ROLES: DEFAULT_ROLES, PLAN_ACTIVITIES: PLAN_ACTIVITIES,
     ACTIVITIES: ACTIVITIES, PHOTO_TYPES: PHOTO_TYPES, LEGACY_SLOT_MAP: LEGACY_SLOT_MAP,
-    bool: bool, isPoleId: isPoleId, poleIdFromLegacy: poleIdFromLegacy, poleMatchesQuery: poleMatchesQuery,
+    bool: bool, isPoleId: isPoleId, validatePoleId: validatePoleId, sameId: sameId, isActive: isActive, workKey: workKey,
+    needsNightPhoto: needsNightPhoto, typeReportState: typeReportState, poleReportStatus: poleReportStatus, hasRin: hasRin,
+    matchesFilter: matchesFilter, labels: labels, validateLabel: validateLabel, nextPlanDate: nextPlanDate,
+    validateImport: validateImport, parsePermissions: parsePermissions, poleIdFromLegacy: poleIdFromLegacy, poleMatchesQuery: poleMatchesQuery,
     isChainageExact: isChainageExact, categoryFromWorkArea: categoryFromWorkArea, chainageSortKey: chainageSortKey,
     activities: activities, photoTypes: photoTypes, typeById: typeById, typesOfActivity: typesOfActivity,
     parseMeasurement: parseMeasurement, hasMeasurement: hasMeasurement, formatMeasurement: formatMeasurement,

@@ -1,88 +1,91 @@
-# Laporan Ujian — Aplikasi Lampu Solar Karak (versi 2)
+# Laporan Ujian — Aplikasi Lampu Solar Karak (versi 3)
 
-Tarikh: 23/11/2026 · Keputusan: **47 / 47 lulus** (33 unit + backend, 14 pelayar)
-Jalankan semula: `npm install` → `npm run test:all`. Ujian guna **data tiang dummy** (`tests/fixtures/dummy-data.js`:
-123 tiang, jumlah sama, chainage rekaan), jadi ia boleh dijalankan dari repo sahaja. Semakan bilangan pada xlsx
-sebenar dijalankan hanya jika fail peribadi itu ada (`data/`). Satu ujian memastikan tiada chainage sebenar dalam fail ujian.
+Tarikh: 24/11/2026 · Keputusan: **85 / 85 lulus**: 25 logik + 16 backend v2 (regresi) + 21 backend v3 + 14 pelayar v2 (regresi) + 10 pelayar v3
+Jalankan semula: `npm install` → `npm run test:all`. Ujian menggunakan **data tiang dummy** (123 tiang, jumlah sama, chainage rekaan).
 
 | Bahagian | Cara ujian |
 |---|---|
-| Logik (status, ukuran, pilihan laporan, tarikh Malaysia, ID) | Ujian unit Node — `tests/logic.test.js` |
-| Backend Apps Script | Kod **sebenar** `Code.gs` + `Logic.gs` dengan tiruan Google Sheets/Drive/Docs yang **ketat** (kaedah Docs yang tidak dikenali = ralat; `setText()` pulangkan kosong seperti Google) — `tests/backend.test.js` |
-| Aplikasi telefon | Chromium (Playwright), skrin 390×844, jam dikawal untuk ujian tarikh — `tests/e2e.test.js` |
-| Susun atur laporan | Pratonton PDF + Word dari definisi susun atur yang sama — `npm run preview` |
+| Logik (status, laporan, label, tarikh, ID, import) | Ujian unit Node — `tests/logic.test.js` |
+| Backend Apps Script | Kod **sebenar** `Code.gs` + `Logic.gs` atas tiruan Google Sheets/Drive/Docs yang ketat — `tests/backend.test.js` (v2), `tests/v3.backend.test.js` |
+| Migrasi | Data v2 dicipta oleh **kod v2 sebenar** (`tests/fixtures/v2-code/`), kemudian kod v3 + `migrateV3` dijalankan pada data yang sama |
+| Aplikasi telefon | Chromium (Playwright), 390 px dan 360 px — `tests/e2e.test.js` (v2), `tests/v3.e2e.test.js` |
 
-⚠️ **Tidak dapat diuji di sini:** Google Docs/Drive/Sheets sebenar (termasuk eksport Word sebenar), log masuk Google,
-telefon sebenar. Pratonton laporan dibuat dengan LibreOffice; laporan sebenar dibuat oleh Google Docs (fon/jarak mungkin
-berbeza sedikit). Sila jana satu laporan sebenar bagi setiap aktiviti selepas deploy.
+⚠️ **Tidak dapat diuji di sini:** Google Sheets/Drive/Docs sebenar, log masuk Google sebenar, telefon sebenar.
+Gunakan senarai semak telefon di bawah.
 
-## 1. Ujian unit (17)
-- Salinan logik frontend = Apps Script.
-- Aktiviti & 8 jenis gambar: ID, minimum (C1 = 4), ukuran (B2–B4) tetap; nama/spesifikasi dari Sheet sahaja.
-- **ID tiang**: SL-034 → SSL034; carian `SSL034`, `34`, `034`, `SL-034`, `ssl34`, `SSL05` (awalan).
-- **Ukuran**: `1.3`, `1,3`, `1.3m`, `2` diterima; kosong / `abc` / `-1` / `.5` / `1.355` / `0` ditolak dengan mesej BM.
-- **Kelengkapan gambar**: semua minimum; C1 dikira 4; contoh `Pegging ✓ · Trial Pit 3/4 · Installation 2/6`;
-  tersembunyi, Ambil semula dan tanpa ukuran tidak dikira; gambar lebih daripada minimum tidak lebih dikira.
-- Status kerja (Belum mula / Dalam proses / Siap / Batal siap / kategori) dan bebas daripada status gambar.
-- **Pilihan laporan**: lalai = terkini yang baik (C1 = 4 terkini, lama → baru); pilihan admin (1, atau 4 ikut susunan);
-  pilihan yang tidak lengkap (cth. satu disembunyikan) → kembali ke automatik.
-- Senarai kekurangan per aktiviti; susun atur laporan (tajuk, lajur, kapsyen, pemisah halaman, saiz muat dalam A4).
-- **Tarikh Malaysia (UTC+8)**: 23:59:59 vs 00:00:01, sempadan tahun; tarikh tidak sah ditolak; beberapa pelan per tiang.
-- Import xlsx dummy: 123 = 33 + 44 + 46, EB 54 / WB 69, 51 CH belum tepat, ID SSL.
-- Matriks kebenaran termasuk tindakan baru (pelan, pilihan laporan, nama).
+## Ujian v3 (baru)
 
-## 2. Ujian backend (16)
-- `setup()` untuk Sheet baru: tab Activities / PhotoTypes / WorkPlan, Settings `ReportMaxPhotos = 60`, tiada tab Slots.
-- Log masuk Google + sesi 30 hari; Active = FALSE / buang pengguna → ditolak serta-merta.
-- **Kebenaran di backend**: 17 tindakan × 3 peranan (termasuk `addPlans`, `editPlan`, `removePlan`, `setReportSelection`,
-  `saveNames`, `reportCheck`, `generateReport`); muat turun PDF & Word untuk semua peranan.
-- Muat naik: ukuran wajib & disahkan untuk B2–B4 (ditolak = tidak disimpan); idempoten; nama fail `SSL040_B2_…`.
-- Pilihan laporan: tepat 1 / tepat 4 ikut susunan; berulang, jenis/tiang lain, tersembunyi ditolak; kosongkan; log.
-- Nama aktiviti/jenis: tukar nama kekalkan pautan gambar; peraturan tetap.
-- **Pelan kerja**: beberapa tiang sekali gus; beberapa pelan per tiang; pendua dilangkau; ubah (tidak boleh jadi pendua);
-  buang; tarikh/aktiviti/tiang tidak sah ditolak; setiap perubahan dalam AuditLog; semua peranan menerima pelan.
-- **Laporan**: `reportCheck` menyenaraikan tiang tidak lengkap; `generateReport` menolak tiang tidak lengkap;
-  had ikut bilangan gambar (60 → Pegging 60 / Trial Pit 15 / Installation 10).
-- **Susun atur laporan** (struktur Google Doc yang dibina): PEGGING 3 sebaris + "Total pegging : 4 nos";
-  TRIAL PIT 3 blok/halaman, kapsyen `SSL034 · WIDTH : 1.3M · LENGTH : 1.6M · DEPTH : 1.5M`, pilihan admin digunakan;
-  INSTALLATION 1 tiang/halaman, 4 gambar progress ikut susunan admin, siang & malam lebih besar; nisbah gambar dikekalkan
-  (potret 118×157, landskap 118×89); PDF **dan** Word dalam `Solar Reports/`; Doc sementara dibuang; muat turun berpecah sama bait.
-- **Migrasi v1 → v2**: ID ditukar dalam Poles, Photos, Notes, WorkPlan, Reports; folder & fail Drive ditukar nama (termasuk
-  kes folder lama + baru wujud); slot lama dipetakan; Slots → Slots_old; satu entri `MigrationV2`; sejarah AuditLog lama
-  tidak diubah; **jalankan kali kedua = tiada perubahan langsung**; ID tidak dikenali → berhenti **sebelum** apa-apa ditukar.
-- Item yang masih dalam barisan telefon dari aplikasi v1 (SL-040, slot S1) masih diterima selepas migrasi.
+**Peranan & kebenaran (backend)**
+- Bagi **setiap** 23 kunci kebenaran: peranan yang hanya ada kunci itu → dibenarkan; peranan dengan semua kunci **lain** → FORBIDDEN.
+- Peranan tanpa kebenaran: masih boleh log masuk & melihat; tiada senarai laporan / suapan.
+- Team & Boss selepas migrasi: kuasa **sama tepat** dengan v2 (9 tindakan disemak).
+- Peranan: cipta, nama berulang (huruf/ruang) ditolak, tukar nama (pengguna ikut), nyahaktif (pengguna dikunci keluar), kunci tidak dikenali ditolak.
+- Admin terbina dalam: tidak boleh dicipta/ubah/tukar nama; edit tab Roles dengan tangan tidak mengurangkan kuasa Admin.
+- **Admin aktif terakhir** dilindungi (nyahaktif, turun peranan, buang — oleh sesiapa pun).
+- Ujian ulangan dengan PhotoID/NoteID sedia ada tetap perlukan kebenaran *(pepijat ditemui & dibaiki)*.
 
-## 3. Ujian pelayar (14)
-- Dashboard & Jadual (admin: tab Semua, tapis, carian `34`).
-- **Esok / Hari ini**: Team/Boss dibuka pada Esok; jam 23:59 (5 Jan) → Esok = 6 Jan; jam 00:00:30 (6 Jan) → 6 Jan
-  menjadi Hari ini dan Esok kosong ("Tiada kerja dirancang untuk esok."); disusun ikut chainage; label aktiviti
-  (beberapa pelan → "Trial Pit · Installation"; kosong → tiada label); **dimuat semula tanpa line → pelan masih ada**.
-- Admin rancang kerja dari Jadual (tanda 2 tiang → tarikh lalai esok → aktiviti) → pendua dilangkau → ubah & buang di skrin tiang.
-- Skrin tiang: 3 kumpulan, spesifikasi Trial Pit, bilangan/minimum; dialog ukuran (kosong/huruf/3 perpuluhan/0 ditolak,
-  `1,3` diterima → "1.3 m" di bawah gambar); "Buang gambar ini" tidak menyimpan apa-apa.
-- **Luar talian**: gambar (termasuk ukuran), nota, Siap → muat semula aplikasi → ukuran masih dipaparkan → online dengan
-  jawapan hilang → tepat 2 gambar, tiada pendua, ukuran tersimpan.
-- Sesi tamat semasa luar talian → log masuk semula → semua dihantar sekali.
-- Peranan UI: Boss tiada kamera/nota/Siap/pilihan laporan/tanda tiang; Team tiada pilihan laporan & tanda tiang.
-- **Admin**: pilih 4 gambar Progress ikut susunan (Simpan hanya aktif pada 4), Ambil semula; laporan Trial Pit dengan satu
-  tiang tidak lengkap → senarai amaran → "Teruskan tanpa tiang ini" → laporan 2 tiang; muat turun **PDF dan Word**;
-  semua tiang tidak lengkap → tiada laporan dijana.
-- Tukar nama jenis/spesifikasi → dipaparkan pada skrin tiang; pengguna; log audit.
-- Watermark (5 kes), GPS 15 saat, tanpa kebenaran lokasi, `config.js` dikemas kini dari GitHub.
+**Tiang**
+- Tukar ID: berulang ditolak untuk `SSL035`, `ssl035`, ` SSL035 `, `Ssl035` dengan mesej menyebut tiang itu; ID sementara SSL999;
+  Photos, Notes, WorkPlan, Reports, pilihan laporan, folder Drive & nama fail dikemas kini; log ID lama/baru; gambar dari telefon
+  dengan **ID lama** masih sampai ke tiang yang betul; tukar balik dibenarkan.
+- Tambah tiang (ID berulang ditolak, amaran CH+bound sebelum simpan, nota), nyahaktif (tiada dalam jumlah, tiada gambar baru),
+  aktif semula, padam (disekat jika ada gambar, perlu taip ID, pelan dibuang, nota kekal, folder kosong ke Trash).
+- Import: pratonton tidak menyimpan apa-apa; ID berulang dalam fail, ID kosong, bound/kategori salah → ralat; langkau / kemas kini.
+- Eksport .xlsx: 123 baris; status kerja, Perlu gambar malam, tarikh pelan seterusnya, tarikh siap sebenar, kemajuan, RIN.
+- Override status (hanya Perlu pasang), tarikh siap sebenar: diisi bila Siap, dikosongkan bila Batal siap; tindakan terkini menang.
 
-## Pepijat ditemui & dibaiki
-1. Carian `ssl34` tidak menjumpai SSL034 → dibaiki (dan `SSL05` kini awalan + bentuk berpad).
-2. Ujian dahulu mengandungi chainage sebenar → kini data dummy; ujian penjaga ditambah.
+**Gambar**
+- Padam: baris dibuang; gambar + thumbnail ke **Trash** (fail masih wujud, bukan padam kekal); pilihan laporan dikosongkan; log ID Drive.
+- Sorok mengosongkan pilihan; edit ukuran (kosong / huruf / 3 perpuluhan / 0 ditolak; `1,25` diterima; log lama/baru).
+- Pindah: ditambah ke tiang tujuan (gambar sedia ada kekal), tukar jenis, ukuran ikut, fail Drive pindah folder & nama.
+- **Gagal di tengah jalan** (Drive diganggu) → pindah & tukar: **tiada perubahan langsung** (rollback).
+- Tukar 2 tiang: satu aktiviti / semua; pilihan laporan ikut gambar; tiang sama / tiada gambar ditolak.
 
-## Senarai semak telefon sebenar (selepas kemas kini v2)
-- [ ] `migrateV2` → log "selesai"; jalankan sekali lagi → "tiada perubahan"
-- [ ] Deploy → Manage deployments → New version; URL sama; log masuk masih berfungsi
-- [ ] Telefon: "Versi baru aplikasi dipasang" → buka semula → ID `SSL…`
-- [ ] Pasukan: tab **Esok** menunjukkan pelan admin; mod kapal terbang → buka semula → pelan masih ada
-- [ ] Trial Pit → Lebar: papan kekunci nombor muncul (Android & iPhone); `1,3` diterima; kosong ditolak
-- [ ] Progress pemasangan: ambil 5 gambar; admin pilih 4 ikut susunan
-- [ ] Jana laporan **Pegging**, **Trial Pit**, **Installation** → buka PDF dalam Drive; buka **.docx dalam Microsoft Word**
-      (jadual, saiz gambar, kapsyen kekal); muat turun dari telefon Boss
-- [ ] Laporan dengan tiang tidak lengkap → senarai amaran → Teruskan / Batal
-- [ ] Watermark masih jelas dalam gambar laporan
-- [ ] Semua item dalam senarai semak v1 (kamera, GPS, luar talian, peranan) masih berfungsi
+**Status, dashboard, label, jadual**
+- Perlu gambar malam: Siap tanpa C3 yang baik (ditanda / tersorok tidak dikira; gambar siang bukan malam; hanya Perlu pasang).
+- **Dashboard sentiasa seimbang**: 200 set data rawak — Siap + Belum mula + Dalam proses + Tunggu = semua tiang aktif;
+  Belum mula + Dalam proses = Baki; setiap kad membuka **tepat** bilangan tiang itu (juga diuji dalam pelayar).
+- Label: lalai, disimpan ikut kunci, maks 20 aksara (backend + kiraan langsung); label 20 aksara pada **360 px**: tiada skrol mendatar,
+  tiada teks terpotong pada dashboard, jadual (termasuk bar pilihan), skrin tiang, laporan, admin.
+- Tarikh jadual = tarikh pelan seterusnya (hari ini atau selepas); hanya pelan lepas → "Belum dirancang"; PlannedDate Excel diabaikan.
+- Jalur gambar: 10 gambar Progress pada **satu baris** yang boleh dileret; tinggi kotak tidak berubah; ukuran di bawah gambar.
+
+**Laporan**
+- Automatik hanya jika bilangan **tepat** (1, atau 4 untuk Progress); lebih → "Perlu pilih gambar"; kurang / tiada ukuran → "Kurang gambar".
+- Pilihan admin v2 dikekalkan. Jana hanya untuk tiang Sedia (backend menolak yang lain). RIN disimpan bagi aktiviti itu sahaja;
+  RIN kosong tidak menghalang; RIN perlukan kebenaran *Rekod No. RIN*. "Dah dilaporkan" disorok, togol menunjukkannya.
+- Skrin laporan: hanya tiang dengan gambar aktiviti itu, ikut chainage; tiang tidak Sedia tidak boleh ditanda;
+  "Pilih semua yang sedia"; ketik "Perlu pilih gambar" → pilih → menjadi Sedia; jalan pintas dari Jadual menanda yang Sedia sahaja.
+
+**Migrasi v2 → v3** (data dibuat oleh kod v2 sebenar: 36 gambar, pilihan admin, nota, Siap, pelan, laporan, gambar tersorok)
+- Bilangan baris semua tab dan bilangan fail Drive **sama sebelum dan selepas**; setiap nilai lama dalam Poles, Photos, Notes,
+  WorkPlan, Reports tidak berubah; log lama tidak diubah + satu baris `MigrationV3`.
+- Jalankan kali kedua → "tiada perubahan" dan Sheet sama tepat. Nama C2 yang ditukar admin dikekalkan.
+- Item dalam barisan telefon dari aplikasi v2 (gambar dengan ukuran `1,2`, nota, Siap) — dan v1 — diterima selepas kemas kini.
+
+## Pepijat ditemui & dibaiki semasa ujian v3
+1. Muat naik/nota ulangan dengan ID sedia ada tidak menyemak kebenaran dahulu → dibaiki.
+2. Bar pilihan di Jadual terlebih lebar (butang terkeluar skrin) → dibaiki, kini diuji pada 360 px.
+3. Label panjang terpotong ("…") dalam lencana → kini dibalut ke baris kedua; ujian mengesan teks terpotong.
+4. Kotak jenis gambar menjadi lebih tinggi bila ada banyak gambar (nota "perlu pilih") → kepala kotak tinggi tetap.
+5. Ralat yang sudah dipaparkan kepada pengguna dilaporkan semula sebagai ralat pelayar → dibaiki.
+
+## Senarai semak telefon sebenar (selepas kemas kini v3)
+- [ ] `migrateV3` → "selesai"; kali kedua → "tiada perubahan"; bilangan baris Photos/Notes/WorkPlan/Reports sama dengan salinan
+- [ ] Deploy → New version; URL sama; log masuk Admin, Team, Boss masih berfungsi
+- [ ] Telefon: "Versi baru aplikasi dipasang" → buka semula
+- [ ] Dashboard: kad Baki / Perlu gambar malam / … — ketik setiap kad, bilangan senarai sama dengan kad
+- [ ] Admin → Peranan: cipta *Supervisor*; beri kepada satu Gmail ujian; log masuk di telefon lain — hanya butang yang dibenarkan
+- [ ] Cuba nyahaktif Admin terakhir → ditolak
+- [ ] Skrin tiang: ambil 6+ gambar Progress → satu baris, leret ke tepi, skrin tidak memanjang (Android & iPhone)
+- [ ] Ketik gambar: Edit ukuran, Pindah ke tiang lain (tukar jenis), Padam → semak fail dalam **Trash** Drive
+- [ ] Tukar gambar antara 2 tiang (satu aktiviti) → semak folder Drive kedua-dua tiang
+- [ ] Edit tiang: tukar ID ke ID yang sudah wujud (huruf kecil) → mesej merah; tukar ke SSL999 → folder Drive bertukar nama
+- [ ] Tambah tiang dengan CH sama → amaran; Nyahaktif → hilang dari senarai; Padam tiang bergambar → disekat
+- [ ] Import fail Excel dengan satu baris salah → pratonton merah → import; Eksport → buka dalam Excel
+- [ ] Laporan: Trial Pit — tiang dengan 2 gambar Korek menunjukkan "Perlu pilih gambar"; pilih → Sedia; jana dengan No. RIN →
+      baris hilang (Dah dilaporkan); PDF + Word dibuka dengan betul
+- [ ] Jadual → tanda tiang → **Jana laporan** → hanya yang Sedia ditanda
+- [ ] Label: tukar satu label kepada 20 aksara → semak dashboard & jadual pada telefon kecil
+- [ ] Pelan: tarikh pelan dipaparkan dalam jadual; pindah tarikh → jadual ikut; tiang tanpa pelan "Belum dirancang"
+- [ ] Mod kapal terbang: ambil gambar & nota → sambung semula → ✅ Semua disimpan (seperti v2)

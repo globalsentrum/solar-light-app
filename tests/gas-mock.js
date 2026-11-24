@@ -31,6 +31,7 @@ function makeIter(arr) { let i = 0; return { hasNext: () => i < arr.length, next
 
 function createRuntime(opts) {
   opts = opts || {};
+  if (opts.state) return attachCode(opts.state, opts);
   const state = { sheets: {}, files: {}, folders: {}, props: {}, docs: {}, seq: 0, urlFetch: opts.urlFetch || null, ownerEmail: opts.ownerEmail || 'owner@example.com' };
   const nextId = (p) => p + (++state.seq).toString().padStart(6, '0') + crypto.randomBytes(3).toString('hex');
 
@@ -84,6 +85,19 @@ function createRuntime(opts) {
     getSheetByName: (n) => state.sheets[n] || null,
     insertSheet: (n) => (state.sheets[n] = new Sheet(n)),
   };
+  state.tempSheets = {};
+  const SpreadsheetApp = {
+    getActiveSpreadsheet: () => spreadsheet,
+    flush() {},
+    create(name) {
+      const id = nextId('F');
+      state.files[id] = new File(id, name, 'application/vnd.google-apps.spreadsheet', Buffer.alloc(0), 'ROOT');
+      const sh = new Sheet('Sheet1');
+      sh.setName = function (n) { this.name = n; return this; };
+      state.tempSheets[id] = sh;
+      return { getId: () => id, getSheets: () => [sh] };
+    },
+  };
 
   // ---------------- Drive ----------------
   class File {
@@ -94,7 +108,13 @@ function createRuntime(opts) {
     getBlob() { return new Blob(this.buf, this.mime, this.name); }
     setName(n) { this.name = n; return this; }
     setTrashed(t) { this.trashed = !!t; return this; }
-    moveTo(folder) { this.parent = folder.id; return this; }
+    moveTo(folder) {
+      if (state.failMoveAfter !== undefined && state.failMoveAfter !== null) {
+        if (state.failMoveAfter <= 0) { state.failMoveAfter = null; throw new Error('Drive error (simulated)'); }
+        state.failMoveAfter--;
+      }
+      this.parent = folder.id; return this;
+    }
     makeCopy(name, folder) {
       const id = nextId('F');
       const f = (state.files[id] = new File(id, name, this.mime, Buffer.from(this.buf), folder ? folder.id : this.parent));
@@ -117,6 +137,7 @@ function createRuntime(opts) {
     createFolder(n) { const id = nextId('D'); return (state.folders[id] = new Folder(id, n, this.id)); }
     createFile(blob) { const id = nextId('F'); return (state.files[id] = new File(id, blob.name, blob.mime, Buffer.from(blob.buf), this.id)); }
     getFiles() { return makeIter(Object.values(state.files).filter((f) => f.parent === this.id && !f.trashed)); }
+    getFilesByName(n) { return makeIter(Object.values(state.files).filter((f) => f.parent === this.id && !f.trashed && f.name === n)); }
     getFolders() { return makeIter(Object.values(state.folders).filter((f) => f.parent === this.id && !f.trashed)); }
     setName(n) { this.name = n; return this; }
     setTrashed(t) { this.trashed = !!t; return this; }
@@ -258,6 +279,15 @@ function createRuntime(opts) {
   };
   const UrlFetchApp = {
     fetch(url, o) {
+      const xs = url.match(/^https:\/\/docs\.google\.com\/spreadsheets\/d\/([^/]+)\/export\?format=xlsx$/);
+      if (xs) {
+        if (!o || !o.headers || o.headers.Authorization !== 'Bearer mock-oauth-token') return { getResponseCode: () => 401, getContentText: () => '', getBlob: () => null };
+        const XLSX = require('xlsx');
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(state.tempSheets[xs[1]].data), 'Sheet1');
+        const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+        return { getResponseCode: () => 200, getContentText: () => '', getBlob: () => new Blob(buf, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'export.xlsx') };
+      }
       const ex = url.match(/^https:\/\/docs\.google\.com\/document\/d\/([^/]+)\/export\?format=docx$/);
       if (ex) {
         if (!o || !o.headers || o.headers.Authorization !== 'Bearer mock-oauth-token') return { getResponseCode: () => 401, getContentText: () => '', getBlob: () => null };
@@ -274,19 +304,30 @@ function createRuntime(opts) {
   const ScriptApp = { getOAuthToken: () => 'mock-oauth-token' };
   const Session = { getEffectiveUser: () => ({ getEmail: () => state.ownerEmail }) };
 
-  const sandbox = {
-    SpreadsheetApp: { getActiveSpreadsheet: () => spreadsheet },
+  state.__services = {
+    SpreadsheetApp,
     DriveApp, DocumentApp, ScriptApp, Utilities, PropertiesService, LockService, ContentService, HtmlService, UrlFetchApp, Session,
     console: { log() {}, error: (...a) => (opts.verbose ? console.error(...a) : undefined) },
     Logger: { log() {} },
   };
+  state.__Blob = Blob;
+  return attachCode(state, opts);
+}
+
+/**
+ * Load Apps Script code into a fresh context that uses the services/state given.
+ * opts.codeDir: folder with Code.gs + Logic.gs (default apps-script/). Used to run the real v2 code and then
+ * the v3 code on the SAME data (migration tests).
+ */
+function attachCode(state, opts) {
+  const sandbox = Object.assign({}, state.__services);
   vm.createContext(sandbox);
-  const dir = path.join(__dirname, '..', 'apps-script');
+  const dir = opts.codeDir || path.join(__dirname, '..', 'apps-script');
   // Load in the "wrong" order on purpose (Code.gs first), like a fresh Apps Script project could.
   ['Code.gs', 'Logic.gs'].forEach((f) => vm.runInContext(fs.readFileSync(path.join(dir, f), 'utf8'), sandbox, { filename: f }));
   // Tests use DUMMY poles (tests/fixtures/dummy-data.js), never the private SeedData.gs.
   vm.runInContext(opts.seedGs || dummySeed(), sandbox, { filename: 'SeedData.gs' });
-  return { g: sandbox, state, Blob };
+  return { g: sandbox, state, Blob: state.__Blob };
 }
 
 module.exports = { createRuntime };

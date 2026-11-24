@@ -55,7 +55,7 @@ async function setup(email, opts) {
 /** Open a pole, take a photo for one photo type (+ measurement if asked). */
 async function takePhoto(page, poleId, typeId, mode, file, measurement) {
   if (!page.url().includes('#/tiang/' + poleId)) await page.goto(page.url().split('#')[0] + '#/tiang/' + poleId);
-  await page.waitForSelector('.slots');
+  await page.waitForSelector('.act');
   const chooser = page.waitForEvent('filechooser');
   await page.locator(`button[data-act=addPhoto][data-type="${typeId}"]`).click();
   await page.click(mode === 'camera' ? 'text=📷 Kamera' : 'text=🖼️ Galeri');
@@ -81,8 +81,9 @@ test('dashboard numbers; Admin opens Jadual on "Semua" with filters, search by n
   const { page, base, close } = await setup('admin@example.com');
   await page.goto(base + '/#/dashboard');
   await page.waitForSelector('.stats');
-  const vals = await page.$$eval('.stat', (els) => els.map((e) => e.querySelector('.stat-label').textContent + '=' + e.querySelector('.stat-val').textContent));
-  assert.deepEqual(vals, ['Kerja siap=33/123', 'Gambar lengkap=0/44', 'Perlu pasang=44', 'Tunggu kelulusan=46', 'Dalam proses=0', 'Belum mula=44']);
+  const vals = await page.$$eval('.stat', (els) => els.map((e) => e.querySelector('.stat-label').textContent + '=' + e.querySelector('.stat-val').textContent +
+    (e.querySelector('.stat-sub') ? ' ' + e.querySelector('.stat-sub').textContent : '')));
+  assert.deepEqual(vals, ['Baki perlu pasang=44 daripada 44', 'Perlu gambar malam=0 🌙', 'Dalam proses=0', 'Belum mula=44', 'Siap=33 daripada 123', 'Tunggu kelulusan=46']);
   await page.screenshot({ path: path.join(OUT, 'screen-dashboard.png'), fullPage: true });
   await page.click('a[href="#/jadual"].btn');
   await page.waitForSelector('.prow');
@@ -92,7 +93,7 @@ test('dashboard numbers; Admin opens Jadual on "Semua" with filters, search by n
   await page.click('[data-act=filter][data-val=EB]');
   assert.equal(await count(), 54);
   await page.click('[data-act=filter][data-group=bound][data-val=all]');
-  await page.click('[data-act=filter][data-val="Tunggu kelulusan"]');
+  await page.click('[data-act=filter][data-val="PENDING"]');
   assert.equal(await count(), 46);
   await page.click('[data-act=filter][data-group=status][data-val=all]');
   await page.fill('#search', '34');
@@ -196,8 +197,8 @@ test('pole screen: 3 activity groups, counts/minimums, measurement required and 
   assert.deepEqual(await page.$$eval('.act h3', (e) => e.map((x) => x.textContent)), ['Pegging', 'Trial Pit', 'Installation']);
   assert.match(await page.textContent('.act >> nth=1 >> .spec'), /Dalam 1.5m, lebar 1m, panjang 1m/);
   assert.match(await page.textContent('.pole-head'), /Pegging 0\/1 · Trial Pit 0\/4 · Installation 0\/6/);
-  assert.match(await page.textContent('.tile:has([data-type=C1])'), /0 gambar · minimum 4/);
-  assert.match(await page.textContent('.tile:has([data-type=B2])'), /perlu ukuran/);
+  assert.match(await page.textContent('.tile:has([data-type=C1])'), /0 📷 \(min 4\)/);
+  assert.match(await page.textContent('.tile:has([data-type=B2])'), /ukuran \(m\)/);
   // measurement dialog: empty / invalid / too many decimals, then "1,3"
   const chooser = page.waitForEvent('filechooser');
   await page.click('button[data-act=addPhoto][data-type="B2"]');
@@ -242,7 +243,7 @@ test('pole screen: 3 activity groups, counts/minimums, measurement required and 
 test('OFFLINE: photos (incl. measurement), note and Siap queued, survive reload, sync once (no duplicates when a reply is lost)', async () => {
   const { page, base, ctx, srv, sheet, close } = await setup('team@example.com');
   await page.goto(base + '/#/tiang/SSL035');
-  await page.waitForSelector('.slots');
+  await page.waitForSelector('.act');
   await page.waitForFunction(() => navigator.serviceWorker && navigator.serviceWorker.controller);
   await ctx.setOffline(true);
   await takePhoto(page, 'SSL035', 'C1', 'camera', 'camera_noexif.jpg');
@@ -253,7 +254,7 @@ test('OFFLINE: photos (incl. measurement), note and Siap queued, survive reload,
   await page.waitForFunction(() => document.querySelector('#syncBtn').textContent.includes('4 item'));
   assert.equal(await syncText(page), '⏳ 4 item menunggu line');
   await page.reload();
-  await page.waitForSelector('.slots');
+  await page.waitForSelector('.act');
   assert.equal(await syncText(page), '⏳ 4 item menunggu line');
   assert.equal(await page.locator('.thumb .tb.wait').count(), 2);
   assert.equal(await page.textContent('.tile:has([data-type=B4]) .meas'), '1.5 m', 'measurement shown while still queued');
@@ -278,7 +279,7 @@ test('OFFLINE: photos (incl. measurement), note and Siap queued, survive reload,
 test('OFFLINE + sign-in expired: nothing lost, sign in again, then sync continues', async () => {
   const { page, base, ctx, srv, sheet, close } = await setup('team@example.com');
   await page.goto(base + '/#/tiang/SSL036');
-  await page.waitForSelector('.slots');
+  await page.waitForSelector('.act');
   await page.waitForFunction(() => navigator.serviceWorker && navigator.serviceWorker.controller);
   await ctx.setOffline(true);
   await takePhoto(page, 'SSL036', 'A1', 'camera', 'camera_noexif.jpg');
@@ -319,7 +320,7 @@ test('UI per role: Boss read-only; Team no admin tools (no ticking, no report ch
   let s = await setup('boss@example.com');
   api(s.srv, 'team@example.com', 'uploadPhoto', { photoId: 'boss_view_0001', poleId: 'SSL034', typeId: 'A1', imageB64: fs.readFileSync(path.join(FIX, 'tiny.jpg')).toString('base64'), source: 'Camera', gpsAvailable: false });
   await s.page.goto(s.base + '/#/tiang/SSL034');
-  await s.page.waitForSelector('.slots');
+  await s.page.waitForSelector('.act');
   for (const sel of ['[data-act=addPhoto]', '#noteText', '[data-act=done]', '[data-act=chooseReport]', 'text=Edit tiang']) {
     assert.equal(await s.page.locator(sel).count(), 0, 'Boss: ' + sel);
   }
@@ -331,7 +332,7 @@ test('UI per role: Boss read-only; Team no admin tools (no ticking, no report ch
   s = await setup('team@example.com');
   api(s.srv, 'team@example.com', 'uploadPhoto', { photoId: 'team_view_0001', poleId: 'SSL034', typeId: 'A1', imageB64: fs.readFileSync(path.join(FIX, 'tiny.jpg')).toString('base64'), source: 'Camera', gpsAvailable: false });
   await s.page.goto(s.base + '/#/tiang/SSL034');
-  await s.page.waitForSelector('.slots');
+  await s.page.waitForSelector('.act');
   assert.equal(await s.page.locator('[data-act=addPhoto]').count() > 0, true);
   assert.equal(await s.page.locator('[data-act=chooseReport]').count(), 0);
   assert.equal(await s.page.locator('text=Edit tiang').count(), 0);
@@ -340,17 +341,17 @@ test('UI per role: Boss read-only; Team no admin tools (no ticking, no report ch
   await s.page.waitForSelector('.prow');
   assert.equal(await s.page.locator('.pchk').count(), 0, 'Team cannot tick poles for planning');
   await s.page.goto(s.base + '/#/tiang/SSL078');
-  await s.page.waitForSelector('.slots');
+  await s.page.waitForSelector('.act');
   assert.equal(await s.page.locator('[data-act=addPhoto]').count(), 0);
   assert.equal(await s.page.locator('#noteText').count(), 1);
   await s.page.goto(s.base + '/#/tiang/SSL001');
-  await s.page.waitForSelector('.slots');
+  await s.page.waitForSelector('.act');
   assert.equal(await s.page.locator('[data-act=addPhoto]').count() > 0, true);
   assert.equal(await s.page.locator('[data-act=done]').count(), 0);
   await s.close();
 });
 
-test('admin: choose report photos (C1 exactly 4 in order), retake/hide, report with missing-photo warning, PDF + Word download', async () => {
+test('admin: choose report photos (C1 exactly 4 in order), retake, report screen statuses, RIN, PDF + Word download', async () => {
   const { page, base, srv, sheet, close } = await setup('admin@example.com');
   const img = fs.readFileSync(path.join(FIX, 'camera_noexif.jpg')).toString('base64');
   let k = 0;
@@ -359,10 +360,12 @@ test('admin: choose report photos (C1 exactly 4 in order), retake/hide, report w
     capturedAt: '2027-01-05T08:' + String(k).padStart(2, '0') + ':00+08:00', measurement }).photo.PhotoID;
   const c1 = [1, 2, 3, 4, 5].map(() => up('SSL034', 'C1'));
   ['SSL034', 'SSL040'].forEach((p) => { up(p, 'B1'); up(p, 'B2', '1.3'); up(p, 'B3', '1.6'); up(p, 'B4', '1.5'); });
-  up('SSL041', 'B1'); // incomplete for Trial Pit
+  up('SSL041', 'B1'); // Kurang gambar
+  ['B1', 'B2', 'B3', 'B4'].forEach((t) => up('SSL045', t, t === 'B1' ? undefined : '1.2'));
+  up('SSL045', 'B1'); // two Korek -> Perlu pilih gambar
   await page.goto(base + '/#/tiang/SSL034');
   await page.waitForSelector('[data-act=chooseReport][data-type=C1]');
-  assert.match(await page.textContent('.tile:has([data-type=C1])'), /Laporan: automatik/);
+  assert.match(await page.textContent('.tile:has([data-type=C1])'), /perlu pilih/, '5 progress photos: no automatic choice');
   await page.click('[data-act=chooseReport][data-type=C1]');
   await page.waitForSelector('.chooser');
   const order = [c1[4], c1[0], c1[2], c1[1]];
@@ -370,47 +373,56 @@ test('admin: choose report photos (C1 exactly 4 in order), retake/hide, report w
   assert.equal(await page.isDisabled('[data-act=selSave]'), true, 'Save disabled until exactly 4');
   await page.click(`.chooser [data-act=selTap][data-id="${order[3]}"]`);
   assert.equal(await page.textContent(`.chooser [data-id="${order[0]}"] .selno`), '1');
-  assert.equal(await page.textContent(`.chooser [data-id="${order[3]}"] .selno`), '4');
   await page.screenshot({ path: path.join(OUT, 'screen-chooser.png') });
   await page.click('[data-act=selSave]');
   await page.waitForSelector('#sheet', { state: 'hidden' });
   assert.deepEqual(order.map((id) => sheet('Photos').find((p) => p.PhotoID === id).ReportOrder), ['1', '2', '3', '4']);
-  assert.match(await page.textContent('.tile:has([data-type=C1])'), /Laporan: pilihan admin/);
-  // retake + hide via viewer
+  assert.match(await page.textContent('.tile:has([data-type=C1])'), /pilihan admin/);
   await page.click(`[data-act=viewPhoto][data-id="${c1[3]}"]`);
   await page.click('text=🔁 Ambil semula');
   await page.waitForSelector('#sheet', { state: 'hidden' });
   assert.equal(sheet('Photos').find((p) => p.PhotoID === c1[3]).RetakeFlag, 'TRUE');
-  // Trial Pit report with an incomplete pole -> warning -> continue without it
+  // report screen: only poles with Trial Pit photos, statuses, only Sedia can be ticked
   await page.goto(base + '/#/laporan');
   await page.click('[data-act=ract][data-val=B]');
-  assert.match(await page.textContent('.checklist label:has(input[value=SSL041])'), /Lebar \(0\/1 gambar\)/);
-  assert.match(await page.textContent('.checklist label:has(input[value=SSL034])'), /sedia/);
-  for (const id of ['SSL041', 'SSL040', 'SSL034']) await page.check(`input[data-act=rsel][value=${id}]`);
+  const ids = await page.$$eval('.rrow-main b', (e) => e.map((x) => x.textContent));
+  assert.deepEqual(ids, ['SSL034', 'SSL040', 'SSL041', 'SSL045'], 'only poles with Trial Pit photos, by chainage');
+  const rowText = (id) => page.textContent(`.rrow:has(input[value=${id}])`);
+  assert.match(await rowText('SSL034'), /Sedia/);
+  assert.match(await rowText('SSL041'), /Kurang gambar/);
+  assert.match(await rowText('SSL045'), /Perlu pilih gambar/);
+  assert.equal(await page.isDisabled('input[data-act=rsel][value=SSL041]'), true);
+  assert.equal(await page.isDisabled('input[data-act=rsel][value=SSL045]'), true);
+  await page.click('[data-act=rselReady]');
+  assert.equal(await page.textContent('#nSel'), '2');
+  await page.fill('#rinGen', 'RIN/TP/012');
+  await page.screenshot({ path: path.join(OUT, 'screen-report-v3.png'), fullPage: true });
   await page.click('[data-act=genReport]');
-  await page.waitForSelector('.warnlist');
-  assert.match(await page.textContent('.warnlist'), /SSL041 — Lebar \(0\/1 gambar\), Panjang \(0\/1 gambar\), Dalam \(0\/1 gambar\)/);
-  await page.screenshot({ path: path.join(OUT, 'screen-report-warning.png') });
-  await page.click('[data-act=genContinue]');
   await page.waitForSelector('[data-act=download][data-format=docx]');
   const rep = sheet('Reports')[0];
   assert.equal(rep.Activity, 'B');
   assert.equal(rep.PoleIDs, 'SSL034, SSL040');
+  assert.deepEqual(sheet('Poles').filter((p) => p.RINTrialPit).map((p) => p.PoleID + ':' + p.RINTrialPit), ['SSL034:RIN/TP/012', 'SSL040:RIN/TP/012']);
+  // reported rows hidden by default, shown with the toggle
+  assert.equal(await page.locator('input[data-act=rsel][value=SSL034]').count(), 0);
+  await page.check('input[data-act=rshowReported]');
+  assert.match(await rowText('SSL034'), /Dah dilaporkan/);
   for (const [format, magic] of [['pdf', '%PDF-MOCK'], ['docx', 'DOCX-MOCK']]) {
     const dl = page.waitForEvent('download');
-    await page.click(`[data-act=download][data-format=${format}]`);
+    await page.click(`[data-act=download][data-format=${format}] >> nth=0`);
     const d = await dl;
     assert.ok(d.suggestedFilename().endsWith('.' + format));
     assert.ok(fs.readFileSync(await d.path(), 'utf8').startsWith(magic), format);
   }
-  // cancel path: nothing generated
-  await page.check('input[data-act=rsel][value=SSL041]');
-  await page.click('[data-act=genReport]');
-  await page.waitForSelector('.warnlist');
-  assert.match(await page.textContent('#sheet'), /Tiada tiang yang lengkap/);
-  await page.click('#sheet [data-act=closeSheet] >> nth=-1');
-  assert.equal(sheet('Reports').length, 1);
-  await page.screenshot({ path: path.join(OUT, 'screen-laporan.png'), fullPage: true });
+  // "Perlu pilih gambar" opens the choice for that pole
+  await page.click('.rrow-main[data-id=SSL045]');
+  await page.click('#sheet [data-act=chooseReport][data-type=B1]');
+  await page.waitForSelector('.chooser');
+  await page.click('.chooser [data-act=selTap] >> nth=0');
+  await page.click('[data-act=selSave]');
+  await page.waitForSelector('#sheet', { state: 'hidden' });
+  assert.match(await rowText('SSL045'), /Sedia/);
+  assert.equal(await page.isDisabled('input[data-act=rsel][value=SSL045]'), false);
   await close();
 });
 

@@ -12,8 +12,8 @@ Anda perlukan:
 - Fail peribadi **`SeedData.gs`** (diberi berasingan, BUKAN dalam GitHub, kerana mengandungi senarai 123 tiang).
   Hanya diperlukan untuk **Google Sheet baru**.
 
-> **Sudah guna versi 1 (slot 1–7, ID SL-001)?** Jangan buat Langkah 1–10 semula.
-> Ikut bahagian **"Kemas kini ke versi 2"** di bawah sekali.
+> **Sudah guna aplikasi?** Jangan buat Langkah 1–10 semula.
+> Versi 2 → ikut **"Kemas kini ke versi 3"** (di bawah sekali). Versi 1 → "Kemas kini ke versi 2" dahulu, kemudian versi 3.
 
 ---
 
@@ -47,6 +47,7 @@ Anda perlukan:
    - Tab **Activities**: 3 baris (Pegging, Trial Pit, Installation)
    - Tab **PhotoTypes**: 8 baris (A1, B1–B4, C1–C3)
    - Tab **WorkPlan**: kosong (pelan kerja)
+   - Tab **Roles**: Admin, Team, Boss
    - Tab **Users**: emel anda sebagai **Admin**. Tukar lajur `Name` kepada nama anda.
    - Tab **Settings**: ada `PhotosFolderID` dan `ReportsFolderID` (sudah terisi)
 7. Dalam Google Drive anda kini ada folder **Solar Photos** dan **Solar Reports**.
@@ -140,7 +141,8 @@ Jika ralat:
 ## Langkah 9 — Tambah pengguna
 
 Dalam aplikasi: tab **Admin → Pengguna → Tambah pengguna** (emel Gmail, nama, peranan).
-Atau terus dalam tab **Users** dalam Sheet (Email, Name, Role = `Admin` / `Team` / `Boss`, Active = `TRUE`).
+Atau terus dalam tab **Users** dalam Sheet (Email, Name, Role = nama peranan dalam tab **Roles**, Active = `TRUE`).
+Peranan baru dicipta dalam aplikasi: **⚙️ Admin → Peranan**.
 
 - Menyahaktif (Active = FALSE) atau membuang pengguna **berkuat kuasa serta-merta**, pada permintaan seterusnya dari telefon mereka.
 - Anda tidak boleh membuang/menyahaktif akaun anda sendiri (supaya tidak terkunci).
@@ -245,3 +247,64 @@ Selepas itu, setiap telefon: buka aplikasi dengan line → mesej "Versi baru apl
 - Admin → **Aktiviti & jenis gambar** → semak nama dan spesifikasi Trial Pit
 - Cuba **Rancang kerja** untuk esok, kemudian log masuk sebagai pasukan → tab **Esok**
 - Jana satu laporan bagi setiap aktiviti dan semak PDF + Word dalam `Solar Reports/`
+
+---
+
+# Kemas kini ke versi 3 (Sheet versi 2 sedia ada)
+
+Versi 3: peranan yang ditetapkan admin, kawalan penuh tiang (tambah / edit ID / nyahaktif / padam / import / eksport),
+urus gambar (padam ke Trash, edit ukuran, pindah, tukar antara 2 tiang), status "Perlu gambar malam", label boleh ubah,
+dashboard baru, tarikh pelan kerja sebagai tarikh jadual, No. RIN, dan skrin laporan baru.
+
+**Keselamatan data:** `migrateV3` hanya **menambah** (lajur, tab, baris tetapan). Tiada gambar, nota, pelan, laporan,
+ukuran, pilihan laporan atau log dipadam atau diubah. Fail Drive tidak pernah dipadam kekal oleh aplikasi — "padam" = Trash.
+
+### W1. Sebelum mula (wajib)
+1. Minta **semua** pasukan buka aplikasi dengan line dan pastikan bar atas **✅ Semua disimpan**.
+   (Item yang masih menunggu dari aplikasi v2 tetap diterima selepas kemas kini, tetapi lebih selamat jika kosong.)
+2. Buat salinan Sheet: **File → Make a copy** (Fail → Buat salinan). Simpan salinan ini.
+3. Buat semua langkah di bawah dalam satu sesi, apabila tiada orang menggunakan aplikasi.
+
+### W2. Tampal kod baru dalam Apps Script
+Sheet → **Extensions → Apps Script**. Ganti **seluruh** isi dua fail ini dengan versi dari GitHub (cabang `v3`, atau `main`
+selepas digabungkan):
+
+| Fail dalam Apps Script | Salin dari GitHub |
+|---|---|
+| `Code.gs` | `apps-script/Code.gs` |
+| `Logic.gs` | `apps-script/Logic.gs` |
+
+`SeedData.gs` **tidak** perlu ditukar. Tekan **💾 Save**.
+
+### W3. Jalankan `migrateV3` (sekali)
+1. Pilih fungsi **`migrateV3`** → **▶ Run**. Jika diminta kebenaran: Review permissions → akaun admin → Advanced → Allow.
+2. Execution log mesti berakhir dengan `migrateV3 selesai: … perubahan.` dan senarai, cth.:
+   `Poles.ActualDate ditambah`, `Tab Roles dicipta`, `Peranan Admin / Team / Boss`, `PhotoTypes C2: "Siap dipasang (siang)" → "Siap pasang (siang)"`.
+3. Semak dalam Sheet:
+   - Tab **Poles**: lajur baru di hujung — `ActualDate`, `Active` (semua TRUE), `PreviousIDs`, `StatusOverride`, `RINPegging`, `RINTrialPit`, `RINInstallation`
+   - Tab baru **Roles**: Admin (ALL), Team, Boss — kuasa sama seperti sebelum ini
+   - Tab **Settings**: baris `Label.…` (label status & kad)
+   - Tab **AuditLog**: satu baris baru `MigrationV3`
+   - Bilangan baris Photos, Notes, WorkPlan, Reports **sama** seperti dalam salinan anda
+4. Jalankan `migrateV3` sekali lagi → log mesti `tiada perubahan (sudah dimigrasi)`.
+
+### W4. Terbitkan versi baru (URL /exec kekal sama)
+1. **Deploy → Manage deployments** → pilih deployment sedia ada → ✏️ **Edit**.
+2. **Version: New version** → Description `v3` → **Deploy**.
+3. URL `/exec` tidak berubah — tidak perlu ubah `config.js` atau Google Cloud.
+⚠️ Jangan guna "New deployment".
+
+### W5. Aplikasi telefon
+Beritahu Claude/pembangun untuk menggabungkan cabang `v3` ke `main`. GitHub Pages dikemas kini dalam 1–3 minit.
+Setiap telefon: buka aplikasi dengan line → "Versi baru aplikasi dipasang" → tutup & buka semula.
+
+### W6. Selepas kemas kini (admin)
+- **⚙️ Admin → Peranan**: cipta peranan anda (cth. Supervisor, Pembuat claim) dan tanda kebenaran.
+- **⚙️ Admin → Pengguna**: tetapkan peranan setiap pengguna.
+- **⚙️ Admin → Tetapan & label**: ubah label jika perlu (maks 20 aksara).
+- Semak satu laporan setiap aktiviti (PDF + Word).
+
+### Jika ada masalah
+- Log `Sheet ini masih format v1` → jalankan `migrateV2` dahulu, kemudian `migrateV3`.
+- Aplikasi menunjukkan ralat selepas W4 tetapi sebelum W5: normal untuk beberapa minit; selesaikan W5.
+- Untuk kembali ke v2: tampal semula `Code.gs`/`Logic.gs` v2, Deploy → New version. Lajur baru boleh dibiarkan (v2 tidak membacanya).

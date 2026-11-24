@@ -174,7 +174,7 @@ test('permissions enforced on the backend for every action incl. plan, photo sel
     assert.equal(call(e, 'downloadReport', { reportId: rep.ReportID }).ok, true, e);
     assert.equal(call(e, 'downloadReport', { reportId: rep.ReportID, format: 'docx' }).ok, true, e);
   }
-  assert.equal(call(ADMIN, 'deletePhoto', { photoId: one }).code, 'BAD');
+  assert.equal(call(TEAM, 'deletePhoto', { photoId: one }).code, 'FORBIDDEN', 'v3: delete exists, admin only by default');
   assert.equal(call(ADMIN, 'saveSlot', { name: 'x' }).code, 'BAD', 'old slot actions removed');
   void upload;
 });
@@ -549,7 +549,7 @@ test('notes, users, audit, feed, doPost', () => {
   assert.equal(admin('removeUser', { email: ADMIN }).code, 'BAD');
   upload(TEAM, 'SSL048', 'A1');
   call(TEAM, 'setDone', { poleId: 'SSL048', done: true });
-  assert.equal(admin('audit', { q: 'SSL048' }).rows[0].Action, 'MarkedDone');
+  assert.deepEqual(admin('audit', { q: 'SSL048' }).rows.slice(0, 2).map((r) => r.Action).sort(), ['MarkedDone', 'PoleEdited'], 'v3: Siap also records the actual date');
   assert.equal(call(TEAM, 'audit', {}).code, 'FORBIDDEN');
   const feed = call(BOSS, 'bootstrap').feed;
   assert.equal(feed[0].Action, 'MarkedDone');

@@ -25,7 +25,10 @@
     rAct: 'A',
     sel: null,
     measResolve: null,
-    reportFilter: { bound: 'all', cat: 'all' },
+    rf: { bound: 'all', q: '', from: '', to: '', showReported: false },
+    moveSel: {},
+    imp: null,
+    rinDraft: '',
     audit: { q: '', rows: [], total: 0 }
   };
   window.__solar = S; // for debugging / tests
@@ -48,9 +51,16 @@
     var n = S.data && S.data.names && S.data.names[String(email).toLowerCase()];
     return n || email;
   }
-  function role() { return S.data && S.data.user ? S.data.user.role : ''; }
-  function isAdmin() { return role() === 'Admin'; }
-  function allowed(action, pole) { return !L.denyReason(role(), action, pole); }
+  function perms() { return S.data && S.data.user ? (S.data.user.perms || []) : []; }
+  /** permission key (roles are defined by admin; the backend checks every action again) */
+  function has(key) { return L.can(perms(), key); }
+  function allowed(key, pole) { return !L.denyReason(perms(), key, pole); }
+  function lab(key) { return (S.data && S.data.labels && S.data.labels[key]) || L.LABEL_DEFAULTS[key]; }
+  function wsLabel(ws) { var k = L.workKey(ws); return k ? lab(k) : ws; }
+  function catLabel(c) { return c === L.CATEGORY.INSTALLED ? lab('INSTALLED') : c === L.CATEGORY.PENDING ? lab('PENDING') : c; }
+  function today() { return L.klDate(Date.now(), 0); }
+  var ADMIN_KEYS = ['manage_users', 'manage_roles', 'edit_settings', 'view_audit_log', 'add_pole', 'import_poles', 'export_data'];
+  function hasAdminTab() { return ADMIN_KEYS.some(has); }
   function online() { return navigator.onLine !== false; }
 
   function toast(msg, ms) {
@@ -74,8 +84,9 @@
 
   function workBadge(ws) {
     var cls = { 'Siap': 'b-done', 'Dalam proses': 'b-prog', 'Belum mula': 'b-none', 'Tunggu kelulusan': 'b-wait' }[ws] || '';
-    return '<span class="badge ' + cls + '">' + esc(ws) + '</span>';
+    return '<span class="badge ' + cls + '">' + esc(wsLabel(ws)) + '</span>';
   }
+  function nightBadge(p, photos) { return L.needsNightPhoto(p, photos) ? '<span class="badge b-night">🌙 ' + esc(lab('NIGHT')) + '</span>' : ''; }
   function photoBadge(ps) {
     if (!ps.required) return '<span class="badge b-na">' + esc(ps.label) + '</span>';
     return '<span class="badge ' + (ps.complete ? 'b-done' : 'b-part') + '">📷 ' + esc(ps.complete ? 'Lengkap' : ps.done + '/' + ps.total) + '</span>';
@@ -317,7 +328,8 @@
     $('backBtn').dataset.back = back || '';
     $('tabs').hidden = false;
     var adminTab = document.querySelector('[data-tab="admin"]');
-    adminTab.hidden = !isAdmin();
+    adminTab.hidden = !hasAdminTab();
+    document.querySelector('[data-tab="dashboard"]').hidden = !has('view_dashboard');
     Array.prototype.forEach.call(document.querySelectorAll('#tabs a'), function (a) {
       a.classList.toggle('active', a.dataset.tab === tab);
     });
@@ -336,18 +348,21 @@
     render._last = location.hash;
     switch (r.name) {
       case 'jadual':
-        if (r.a) { S.filters.status = r.a; S.filters.bound = 'all'; S.filters.q = ''; history.replaceState(null, '', '#/jadual'); render._last = '#/jadual'; }
+        if (r.a) { S.filters.status = r.a; S.filters.bound = 'all'; S.filters.q = ''; S.jtab = 'semua'; history.replaceState(null, '', '#/jadual'); render._last = '#/jadual'; }
         renderJadual(); break;
       case 'tiang': r.b === 'edit' ? renderPoleEdit(r.a) : renderPole(r.a); break;
       case 'laporan': renderReports(); break;
       case 'admin':
-        if (!isAdmin()) { go('#/dashboard'); return; }
-        if (r.a === 'pengguna') renderUsers();
-        else if (r.a === 'tetapan') renderNames();
-        else if (r.a === 'log') renderAudit();
+        if (!hasAdminTab()) { go('#/jadual'); return; }
+        if (r.a === 'pengguna' && has('manage_users')) renderUsers();
+        else if (r.a === 'peranan' && has('manage_roles')) renderRoles();
+        else if (r.a === 'tetapan' && has('edit_settings')) renderNames();
+        else if (r.a === 'log' && has('view_audit_log')) renderAudit();
+        else if (r.a === 'tiang-baru' && has('add_pole')) renderAddPole();
+        else if (r.a === 'import' && has('import_poles')) renderImport();
         else renderAdminMenu();
         break;
-      default: renderDashboard();
+      default: if (has('view_dashboard')) renderDashboard(); else { go('#/jadual'); return; }
     }
     if (same) window.scrollTo(0, y); else window.scrollTo(0, 0);
   }
@@ -359,46 +374,31 @@
     setChrome('Dashboard', '', 'dashboard');
     var m = merged();
     var d = L.dashboard(m.poles, m.types, m.statusPhotos, m.acts);
-    function card(label, val, sub, href) {
-      return '<a class="stat" href="' + href + '"><div class="stat-val">' + val + '</div><div class="stat-label">' + label + '</div>' +
-        (sub ? '<div class="stat-sub">' + sub + '</div>' : '') + '</a>';
+    function card(key, val, sub, cls) {
+      return '<a class="stat' + (cls ? ' ' + cls : '') + '" href="#/jadual/' + key + '"><div class="stat-val">' + val + '</div>' +
+        '<div class="stat-label">' + esc(lab(key)) + '</div>' + (sub ? '<div class="stat-sub">' + sub + '</div>' : '') + '</a>';
     }
     function bar(b) {
       var x = d.bound[b] || { total: 0, done: 0 };
       var pct = x.total ? Math.round(100 * x.done / x.total) : 0;
-      return '<div class="bound"><div class="bound-head"><b>' + b + '</b><span>' + x.done + ' / ' + x.total + ' siap (' + pct + '%)</span></div>' +
+      return '<div class="bound"><div class="bound-head"><b>' + b + '</b><span>' + x.done + ' / ' + x.total + ' ' + esc(lab('DONE')).toLowerCase() + ' (' + pct + '%)</span></div>' +
         '<div class="bar"><div style="width:' + pct + '%"></div></div></div>';
     }
-    var incomplete = d.incomplete.map(function (x) {
-      return '<li><a href="#/tiang/' + esc(x.PoleID) + '"><b>' + esc(x.PoleID) + '</b> · ' + esc(x.detail) +
-        '<div class="muted small">Kurang: ' + esc(x.missing.join(', ')) + '</div></a></li>';
-    }).join('');
     var feed = (S.data.feed || []).map(function (f) {
       return '<li><span class="muted small">' + esc(fmtDT(f.Timestamp)) + '</span><br><b>' + esc(f.Name) + '</b> ' + feedText(f) + '</li>';
     }).join('');
     $('view').innerHTML =
       '<section class="stats">' +
-      card('Kerja siap', d.done + '<small>/' + d.total + '</small>', '', '#/jadual/Siap') +
-      card('Gambar lengkap', d.photoComplete + '<small>/' + d.photoRequired + '</small>', 'tiang perlu gambar', '#/jadual/Perlu pasang') +
-      card('Perlu pasang', d.todo, '', '#/jadual/Perlu pasang') +
-      card('Tunggu kelulusan', d.pending, '', '#/jadual/Tunggu kelulusan') +
-      card('Dalam proses', d.inProgress, '', '#/jadual/Dalam proses') +
-      card('Belum mula', d.notStarted, '', '#/jadual/Belum mula') +
+      card('BAKI', d.baki, 'daripada ' + d.todo, 'big') +
+      card('NIGHT', d.night, '🌙') +
+      card('IN_PROGRESS', d.inProgress) +
+      card('NOT_STARTED', d.notStarted) +
+      card('DONE', d.done, 'daripada ' + d.total) +
+      card('PENDING', d.pending) +
       '</section>' +
       '<section class="card"><h3>Kemajuan mengikut bound</h3>' + bar('EB') + bar('WB') + '</section>' +
       '<a class="btn block" href="#/jadual">📋 Buka jadual kerja</a>' +
-      listBlock('Gambar belum lengkap', d.incomplete.length, '<ul class="plist">' + incomplete + '</ul>') +
-      listBlock('Ditanda "Ambil semula"', d.retake.length, poleLinks(d.retake)) +
-      listBlock('CH belum tepat', d.chInexact.length, poleLinks(d.chInexact)) +
       '<section class="card"><h3>Aktiviti terkini</h3>' + (feed ? '<ul class="feed">' + feed + '</ul>' : '<p class="muted">Tiada aktiviti lagi.</p>') + '</section>';
-  }
-
-  function listBlock(title, n, inner) {
-    return '<details class="card"' + (n && n <= 8 ? ' open' : '') + '><summary><b>' + esc(title) + '</b> <span class="count">' + n + '</span></summary>' +
-      (n ? inner : '<p class="muted">Tiada.</p>') + '</details>';
-  }
-  function poleLinks(ids) {
-    return '<div class="chips">' + ids.map(function (id) { return '<a class="chip" href="#/tiang/' + esc(id) + '">' + esc(id) + '</a>'; }).join('') + '</div>';
   }
 
   function feedText(f) {
@@ -426,38 +426,36 @@
   // =================================================================
   // Screen 2 — Jadual kerja
   // =================================================================
+  var STATUS_FILTERS = ['BAKI', 'NIGHT', 'NOT_STARTED', 'IN_PROGRESS', 'DONE', 'PENDING'];
+
   function renderJadual() {
     setChrome('Jadual kerja', '', 'jadual');
     var m = merged();
-    if (!S.jtab) S.jtab = isAdmin() ? 'semua' : 'esok';
+    if (!S.jtab) S.jtab = has('plan_work') ? 'semua' : 'esok';
     var tabs = '<div class="seg">' + [['hari', 'Hari ini'], ['esok', 'Esok'], ['semua', 'Semua']].map(function (t) {
       return '<button class="seg-btn' + (S.jtab === t[0] ? ' on' : '') + '" data-act="jtab" data-val="' + t[0] + '">' + t[1] + '</button>';
     }).join('') + '</div>';
+    var active = m.poles.filter(L.isActive);
     var body;
     if (S.jtab !== 'semua') {
       var date = L.klDate(Date.now(), S.jtab === 'esok' ? 1 : 0);
       var byPole = L.plansForDate(m.plans, date);
-      var rows = L.sortPolesByChainage(m.poles.filter(function (p) { return byPole[p.PoleID]; }));
+      var rows = L.sortPolesByChainage(active.filter(function (p) { return byPole[p.PoleID]; }));
       body = '<div class="card"><b>Pelan kerja ' + (S.jtab === 'esok' ? 'esok' : 'hari ini') + '</b> · ' + esc(fmtDate(date)) +
         ' <span class="muted small">(' + rows.length + ' tiang)</span></div>' +
         (rows.length ? '<div class="plist2">' + rows.map(function (p) {
           var acts = [];
-          byPole[p.PoleID].forEach(function (pl) { var n = pl.Activity ? actName(pl.Activity) : ''; if (n && acts.indexOf(n) < 0) acts.push(n); });
+          byPole[p.PoleID].forEach(function (pl) { var n = planActName(pl.Activity); if (n && acts.indexOf(n) < 0) acts.push(n); });
           return poleRow(p, m, acts.join(' · '));
         }).join('') + '</div>'
           : '<p class="card center muted empty-plan">Tiada kerja dirancang untuk ' + (S.jtab === 'esok' ? 'esok' : 'hari ini') + '.</p>');
     } else {
       var f = S.filters;
-      var list = L.sortPolesByChainage(m.poles).filter(function (p) {
+      var showInactive = f.status === 'INACTIVE';
+      var list = L.sortPolesByChainage(showInactive ? m.poles.filter(function (p) { return !L.isActive(p); }) : active).filter(function (p) {
         if (f.bound !== 'all' && p.Bound !== f.bound) return false;
         if (f.q && !L.poleMatchesQuery(p.PoleID, f.q)) return false;
-        var ws = L.workStatus(p, m.statusPhotos);
-        if (f.status === 'Perlu pasang' && p.Category !== L.CATEGORY.TODO) return false;
-        if (f.status === 'Dalam proses' && ws !== L.WORK.IN_PROGRESS) return false;
-        if (f.status === 'Siap' && ws !== L.WORK.DONE) return false;
-        if (f.status === 'Belum mula' && ws !== L.WORK.NOT_STARTED) return false;
-        if (f.status === 'Tunggu kelulusan' && p.Category !== L.CATEGORY.PENDING) return false;
-        return true;
+        return showInactive || L.matchesFilter(p, f.status, m.statusPhotos);
       });
       var chip = function (group, val, label) {
         return '<button class="chip' + (f[group] === val ? ' on' : '') + '" data-act="filter" data-group="' + group + '" data-val="' + esc(val) + '">' + esc(label) + '</button>';
@@ -465,16 +463,18 @@
       body = '<div class="filters card">' +
         '<input id="search" type="search" placeholder="Cari ID tiang (cth. SSL034 atau 34)" value="' + esc(f.q) + '" autocomplete="off">' +
         '<div class="chips">' + chip('bound', 'all', 'Semua') + chip('bound', 'EB', 'EB') + chip('bound', 'WB', 'WB') + '</div>' +
-        '<div class="chips">' + chip('status', 'all', 'Semua status') + chip('status', 'Perlu pasang', 'Perlu pasang') +
-        chip('status', 'Dalam proses', 'Dalam proses') + chip('status', 'Siap', 'Siap') + chip('status', 'Tunggu kelulusan', 'Tunggu kelulusan') +
-        (f.status === 'Belum mula' ? chip('status', 'Belum mula', 'Belum mula') : '') + '</div>' +
+        '<div class="chips">' + chip('status', 'all', 'Semua status') + STATUS_FILTERS.map(function (k) { return chip('status', k, lab(k)); }).join('') +
+        (has('delete_pole') ? chip('status', 'INACTIVE', 'Tidak aktif') : '') + '</div>' +
         '<div class="muted small">' + list.length + ' tiang · disusun ikut chainage</div></div>' +
         '<div class="plist2">' + (list.map(function (p) { return poleRow(p, m, ''); }).join('') || '<p class="muted center">Tiada tiang.</p>') + '</div>';
     }
-    var nSel = Object.keys(S.planSel).filter(function (k) { return S.planSel[k]; }).length;
-    var planBar = isAdmin() ? '<div class="planbar' + (nSel ? ' show' : '') + '"><span>' + nSel + ' tiang dipilih</span>' +
-      '<button class="btn small ghost" data-act="planClear">Kosongkan</button>' +
-      '<button class="btn small" data-act="planOpen"' + (nSel ? '' : ' disabled') + '>📅 Rancang kerja</button></div>' : '';
+    var nSel = selCount();
+    var canTick = has('plan_work') || has('generate_report');
+    var planBar = canTick ? '<div class="planbar' + (nSel ? ' show' : '') + '"><span>' + nSel + ' tiang dipilih</span>' +
+      '<button class="btn small ghost x-btn" data-act="planClear" aria-label="Kosongkan pilihan" title="Kosongkan">✕</button>' +
+      (has('plan_work') ? '<button class="btn small" data-act="planOpen"' + (nSel ? '' : ' disabled') + '>📅 Rancang</button>' : '') +
+      (has('generate_report') ? '<button class="btn small" data-act="reportFromSchedule"' + (nSel ? '' : ' disabled') + '>📄 Jana laporan</button>' : '') +
+      '</div>' : '';
     $('view').innerHTML = tabs + body + planBar;
     var s = $('search');
     if (s) s.oninput = function () {
@@ -484,23 +484,29 @@
       var s2 = $('search'); s2.focus(); try { s2.setSelectionRange(pos, pos); } catch (e) { /* ignore */ }
     };
   }
+  function selCount() { return Object.keys(S.planSel).filter(function (k) { return S.planSel[k]; }).length; }
+  function planActName(v) { return v === 'C3' ? typeName('C3') : v ? actName(v) : ''; }
 
   function poleRow(p, m, planLabel) {
     var ws = L.workStatus(p, m.statusPhotos);
     var ps = L.photoStatus(p, m.types, m.statusPhotos, m.acts);
-    return '<div class="prow">' +
-      (isAdmin() ? '<label class="pchk"><input type="checkbox" data-act="psel" value="' + esc(p.PoleID) + '"' + (S.planSel[p.PoleID] ? ' checked' : '') + '></label>' : '') +
-      '<a class="prow-link" href="#/tiang/' + esc(p.PoleID) + '">' +
+    var next = L.nextPlanDate(m.plans, p.PoleID, today());
+    var canTick = has('plan_work') || has('generate_report');
+    return '<div class="prow' + (L.isActive(p) ? '' : ' inactive') + '">' +
+      (canTick ? '<label class="pchk"><input type="checkbox" data-act="psel" value="' + esc(p.PoleID) + '"' + (S.planSel[p.PoleID] ? ' checked' : '') + '></label>' : '') +
+      '<a class="prow-link" href="#/tiang/' + encodeURIComponent(p.PoleID) + '">' +
       '<div class="prow-main"><b>' + esc(p.PoleID) + '</b> <span class="muted">· ' + esc(p.Bound) + '</span>' +
       (planLabel ? ' <span class="badge b-plan">' + esc(planLabel) + '</span>' : '') +
-      '<div class="small">' + esc(p.Chainage) + (p.PlannedDate ? ' · 📅 ' + esc(fmtDate(p.PlannedDate)) : '') + '</div></div>' +
-      '<div class="prow-badges">' + workBadge(ws) + photoBadge(ps) + chBadge(p) + '</div></a></div>';
+      '<div class="small">' + esc(p.Chainage) + '</div>' +
+      '<div class="small ' + (next ? '' : 'muted') + '">📅 ' + (next ? esc(fmtDate(next)) : 'Belum dirancang') + '</div></div>' +
+      '<div class="prow-badges">' + workBadge(ws) + nightBadge(p, m.statusPhotos) + photoBadge(ps) + chBadge(p) +
+      (L.isActive(p) ? '' : '<span class="badge b-warn">Tidak aktif</span>') + '</div></a></div>';
   }
 
   function activityOptions(cur) {
-    return '<option value=""' + (cur ? '' : ' selected') + '>— tiada —</option>' + L.activities(S.data.activities).map(function (a) {
-      return '<option value="' + a.ActivityID + '"' + (cur === a.ActivityID ? ' selected' : '') + '>' + esc(a.Name) + '</option>';
-    }).join('');
+    var opts = [['', '— tiada —']].concat(L.activities(S.data.activities).map(function (a) { return [a.ActivityID, a.Name]; }))
+      .concat([['C3', typeName('C3')]]);
+    return opts.map(function (o) { return '<option value="' + o[0] + '"' + ((cur || '') === o[0] ? ' selected' : '') + '>' + esc(o[1]) + '</option>'; }).join('');
   }
 
   function openPlanSheet() {
@@ -543,19 +549,22 @@
     setChrome(p.PoleID, '#/jadual', 'jadual');
     var ws = L.workStatus(p, m.statusPhotos);
     var ps = L.photoStatus(p, m.types, m.statusPhotos, m.acts);
-    var canPhoto = allowed('uploadPhoto', p);
-    var canNote = allowed('addNote', p);
-    var canDone = allowed('setDone', p);
+    var canPhoto = allowed('capture_photo', p);
+    var canNote = allowed('add_note', p);
+    var canDone = allowed('mark_done', p);
     if (canPhoto) S.gps.start();
-    var photosOfPole = m.photos.filter(function (x) { return x.PoleID === p.PoleID && (isAdmin() || !L.bool(x.Hidden)); });
+    var photosOfPole = m.photos.filter(function (x) { return x.PoleID === p.PoleID && (has('hide_photo') || !L.bool(x.Hidden)); });
 
     var groups = m.acts.map(function (a) {
       var st = ps.activities.filter(function (x) { return x.ActivityID === a.ActivityID; })[0];
+      var rin = String(p[L.RIN_FIELD[a.ActivityID]] || '');
       return '<section class="act"><div class="act-head"><h3>' + esc(a.Name) + '</h3>' +
-        (ps.required ? '<span class="badge ' + (st.complete ? 'b-done' : 'b-part') + '">' + (st.complete ? '✓' : st.done + '/' + st.total) + '</span>' : '') + '</div>' +
+        (ps.required ? '<span class="badge ' + (st.complete ? 'b-done' : 'b-part') + '">' + (st.complete ? '✓' : st.done + '/' + st.total) + '</span>' : '') +
+        (rin || has('record_rin') ? '<button class="rin' + (rin ? ' set' : '') + '"' + (has('record_rin') ? ' data-act="rinEdit" data-pole="' + esc(p.PoleID) + '" data-act-id="' + a.ActivityID + '"' : ' disabled') +
+          '>📄 RIN: ' + esc(rin || '—') + '</button>' : '') + '</div>' +
         (a.Spec ? '<div class="spec">📐 ' + esc(a.Spec) + '</div>' : '') +
-        '<div class="slots">' + L.typesOfActivity(m.types, a.ActivityID).map(function (t) { return typeTile(p, t, photosOfPole, m, canPhoto); }).join('') +
-        '</div></section>';
+        L.typesOfActivity(m.types, a.ActivityID).map(function (t) { return typeTile(p, t, photosOfPole, m, canPhoto); }).join('') +
+        '</section>';
     }).join('');
 
     var notes = m.notes.filter(function (n) { return n.PoleID === p.PoleID; })
@@ -568,28 +577,47 @@
     try { draft = localStorage.getItem('solar.draft.' + p.PoleID) || ''; } catch (e) { /* ignore */ }
     var plans = m.plans.filter(function (x) { return x.PoleID === p.PoleID; }).sort(function (a, b) { return a.Date < b.Date ? -1 : 1; });
     var plansHtml = plans.map(function (x) {
-      return '<li><span>📅 ' + esc(fmtDate(x.Date)) + (x.Activity ? ' · ' + esc(actName(x.Activity)) : '') + '</span>' +
-        (isAdmin() ? '<button class="btn small ghost" data-act="planEdit" data-id="' + esc(x.PlanID) + '">✏️</button>' : '') + '</li>';
+      return '<li><span>📅 ' + esc(fmtDate(x.Date)) + (x.Activity ? ' · ' + esc(planActName(x.Activity)) : '') + (x.Date < today() ? ' <span class="muted small">(lepas)</span>' : '') + '</span>' +
+        (has('plan_work') ? '<button class="btn small ghost" data-act="planEdit" data-id="' + esc(x.PlanID) + '">✏️</button>' : '') + '</li>';
     }).join('');
+    var next = L.nextPlanDate(m.plans, p.PoleID, today());
 
     var doneBtn = '';
     if (canDone) {
-      doneBtn = L.bool(p.IsDone)
+      doneBtn = ws === L.WORK.DONE && L.bool(p.IsDone)
         ? '<button class="btn block ghost" data-act="done" data-id="' + esc(p.PoleID) + '" data-val="0">↩ Batal siap</button>'
-        : '<button class="btn block success" data-act="done" data-id="' + esc(p.PoleID) + '" data-val="1">✔ Tanda kerja siap</button>';
+        : ws === L.WORK.DONE ? ''
+          : '<button class="btn block success" data-act="done" data-id="' + esc(p.PoleID) + '" data-val="1">✔ Tanda kerja siap</button>';
     }
-    var catNote = p.Category === L.CATEGORY.PENDING ? '<div class="info-box">Tiang ini <b>Tunggu kelulusan</b>. Gambar dan status Siap dibuka selepas admin menukar kategori kepada Perlu pasang.</div>'
-      : p.Category === L.CATEGORY.INSTALLED ? '<div class="info-box">Tiang ini <b>Sudah dipasang</b>. Gambar tidak diwajibkan (boleh ditambah jika perlu).</div>' : '';
+    var tools = [];
+    if (has('edit_pole')) tools.push('<a class="btn small ghost" href="#/tiang/' + encodeURIComponent(p.PoleID) + '/edit">✏️ Edit tiang</a>');
+    if (has('override_status') && p.Category === L.CATEGORY.TODO) tools.push('<button class="btn small ghost" data-act="overrideOpen" data-id="' + esc(p.PoleID) + '">⚙️ Status</button>');
+    if (has('move_photo')) {
+      tools.push('<button class="btn small ghost" data-act="moveOpen" data-id="' + esc(p.PoleID) + '">🔀 Pindah gambar</button>');
+      tools.push('<button class="btn small ghost" data-act="swapOpen" data-id="' + esc(p.PoleID) + '">⇄ Tukar dengan tiang lain</button>');
+    }
+    if (has('delete_pole')) {
+      tools.push(L.isActive(p) ? '<button class="btn small ghost" data-act="poleActive" data-id="' + esc(p.PoleID) + '" data-val="0">⏸ Nyahaktif</button>'
+        : '<button class="btn small ghost" data-act="poleActive" data-id="' + esc(p.PoleID) + '" data-val="1">▶ Aktifkan semula</button>');
+      tools.push('<button class="btn small danger" data-act="poleDelete" data-id="' + esc(p.PoleID) + '">🗑 Padam tiang</button>');
+    }
+    var catNote = !L.isActive(p) ? '<div class="info-box warn-box">Tiang ini <b>tidak aktif</b> — tidak dipaparkan dalam senarai dan jumlah.</div>'
+      : p.Category === L.CATEGORY.PENDING ? '<div class="info-box">Tiang ini <b>' + esc(lab('PENDING')) + '</b>. Gambar dan status Siap dibuka selepas admin menukar kategori kepada Perlu pasang.</div>'
+      : p.Category === L.CATEGORY.INSTALLED ? '<div class="info-box">Tiang ini <b>' + esc(lab('INSTALLED')) + '</b>. Gambar tidak diwajibkan (boleh ditambah jika perlu).</div>' : '';
 
     $('view').innerHTML =
       '<section class="card pole-head">' +
-      '<div class="pole-title"><h2>' + esc(p.PoleID) + '</h2>' + (isAdmin() ? '<a class="btn small ghost" href="#/tiang/' + esc(p.PoleID) + '/edit">✏️ Edit tiang</a>' : '') + '</div>' +
+      '<div class="pole-title"><h2>' + esc(p.PoleID) + '</h2></div>' +
       '<div>' + esc(p.Chainage) + ' · <b>' + esc(p.Bound) + '</b> ' + chBadge(p) + '</div>' +
-      '<div class="muted small">Kategori: ' + esc(p.Category) + (p.PlannedDate ? ' · Tarikh rancang: ' + esc(fmtDate(p.PlannedDate)) : '') + '</div>' +
-      '<div class="badges">' + workBadge(ws) + (p._donePending ? '<span class="badge b-wait">⏳</span>' : '') + ' ' +
+      '<div class="muted small">Kategori: ' + esc(catLabel(p.Category)) + ' · 📅 ' + (next ? esc(fmtDate(next)) : 'Belum dirancang') +
+      (p.ActualDate ? ' · Siap sebenar: ' + esc(fmtDate(p.ActualDate)) : '') + '</div>' +
+      (p.PreviousIDs ? '<div class="muted small">ID lama: ' + esc(p.PreviousIDs) + '</div>' : '') +
+      '<div class="badges">' + workBadge(ws) + (p.StatusOverride ? '<span class="badge b-wait">⚙️ admin</span>' : '') +
+      (p._donePending ? '<span class="badge b-wait">⏳</span>' : '') + nightBadge(p, m.statusPhotos) + ' ' +
       '<span class="badge ' + (ps.required ? (ps.complete ? 'b-done' : 'b-part') : 'b-na') + '">' + esc(ps.required ? ps.label : 'Gambar: ' + ps.label) + '</span></div>' +
       (ps.required && !ps.complete ? '<div class="small progress-line">' + esc(ps.detail) + '</div>' : '') +
-      (L.bool(p.IsDone) && p.DoneBy && p.Category === L.CATEGORY.TODO ? '<div class="muted small">Siap oleh ' + esc(nameOf(p.DoneBy)) + ' · ' + esc(fmtDT(p.DoneAt)) + '</div>' : '') +
+      (L.bool(p.IsDone) && p.DoneBy && p.Category === L.CATEGORY.TODO && !p.StatusOverride ? '<div class="muted small">Siap oleh ' + esc(nameOf(p.DoneBy)) + ' · ' + esc(fmtDT(p.DoneAt)) + '</div>' : '') +
+      (tools.length ? '<div class="row-btns tools">' + tools.join('') + '</div>' : '') +
       '</section>' + catNote +
       (plansHtml ? '<section class="card"><h3>Pelan kerja</h3><ul class="planlist">' + plansHtml + '</ul></section>' : '') +
       groups + doneBtn +
@@ -603,6 +631,7 @@
     loadThumbs(p.PoleID, photosOfPole);
   }
 
+  /** One photo type = one line: name, "6 📷 (min 4)", one horizontal swipe strip of thumbnails, buttons. */
   function typeTile(p, t, photosOfPole, m, canPhoto) {
     var inType = photosOfPole.filter(function (x) { return x.PhotoTypeID === t.TypeID; })
       .sort(function (a, b) { return String(a.CapturedAt) < String(b.CapturedAt) ? 1 : -1; });
@@ -610,32 +639,25 @@
     var visible = inType.filter(function (x) { return !L.bool(x.Hidden) && !x._failed; });
     var icon = st.state === 'ok' ? '✅' : st.state === 'retake' ? '🔁' : st.state === 'partial' ? '◐' : '📷';
     var cls = 'tile ' + (st.state === 'ok' ? 'filled' : st.state === 'retake' ? 'retake' : st.state === 'partial' ? 'partial' : 'empty');
-    var head = '<div class="tile-head"><span class="tile-icon">' + icon + '</span><div><b>' + esc(t.Name) + '</b>' +
-      '<div class="muted small">' + visible.length + ' gambar · minimum ' + t.MinPhotos + (t.NeedsMeasurement ? ' · perlu ukuran (m)' : '') + '</div></div></div>';
-    var body = '';
-    var latest = inType.filter(function (x) { return !L.bool(x.Hidden); })[0];
-    if (inType.length) {
-      body += '<div class="thumbs">' + inType.map(function (x) { return thumbHtml(x, t); }).join('') + '</div>';
-      if (latest) body += '<div class="muted small">' + esc(nameOf(latest.TakenBy)) + ' · ' + esc(fmtDT(latest.CapturedAt)) +
-        (latest.Source === 'Gallery' ? ' · galeri' : '') + '</div>';
-      if (st.state === 'retake') body += '<div class="err small">Ambil semula</div>';
-      if (st.noMeasurement) body += '<div class="err small">Ada gambar tanpa ukuran</div>';
-    } else {
-      body += '<div class="muted small">Belum ada gambar</div>';
-    }
+    var rs = L.typeReportState(p.PoleID, t.TypeID, m.photos.filter(function (x) { return !x._qid; }));
     var btns = '';
     if (canPhoto) {
       btns += '<button class="btn small' + (inType.length ? ' ghost' : '') + '" data-act="addPhoto" data-pole="' + esc(p.PoleID) +
-        '" data-type="' + esc(t.TypeID) + '">' + (inType.length ? '+ Tambah gambar' : '📷 Ambil gambar') + '</button>';
+        '" data-type="' + esc(t.TypeID) + '">' + (inType.length ? '+ Tambah' : '📷 Ambil gambar') + '</button>';
     }
-    var server = visible.filter(function (x) { return !x._qid; });
-    if (isAdmin() && server.length) {
-      var chosen = L.isAdminChoice(p.PoleID, t.TypeID, m.photos);
-      btns += '<button class="btn small ghost" data-act="chooseReport" data-pole="' + esc(p.PoleID) + '" data-type="' + esc(t.TypeID) + '">★ Pilih untuk laporan</button>' +
-        '<div class="muted small">Laporan: ' + (chosen ? 'pilihan admin' : 'automatik (terkini)') + '</div>';
+    if (has('select_report_photos') && visible.some(function (x) { return !x._qid; })) {
+      btns += '<button class="btn small ghost" data-act="chooseReport" data-pole="' + esc(p.PoleID) + '" data-type="' + esc(t.TypeID) + '">★ Laporan</button>';
     }
-    return '<div class="' + cls + '" ' + (canPhoto && !inType.length ? 'data-act="addPhoto" data-pole="' + esc(p.PoleID) + '" data-type="' + esc(t.TypeID) + '"' : '') + '>' +
-      head + body + '<div class="row-btns">' + btns + '</div></div>';
+    var repNote = rs.state === 'ok' ? (rs.how === 'admin' ? '★ pilihan admin' : '★ automatik') : rs.state === 'choose' ? '⚠️ perlu pilih' : '';
+    return '<div class="' + cls + '">' +
+      '<div class="tile-head"><span class="tile-icon">' + icon + '</span><div class="tile-title"><b class="tile-name">' + esc(t.Name) + '</b>' +
+      '<div class="tile-sub"><span class="count-pill">' + visible.length + ' 📷 (min ' + t.MinPhotos + ')</span>' +
+      (t.NeedsMeasurement ? ' <span class="muted small">· ukuran (m)</span>' : '') +
+      (repNote && (has('select_report_photos') || has('generate_report')) ? ' <span class="muted small">· ' + repNote + '</span>' : '') + '</div></div></div>' +
+      (inType.length ? '<div class="strip">' + inType.map(function (x) { return thumbHtml(x, t); }).join('') + '</div>' : '') +
+      (st.state === 'retake' ? '<div class="err small">Ambil semula</div>' : '') +
+      (st.noMeasurement ? '<div class="err small">Ada gambar tanpa ukuran</div>' : '') +
+      (btns ? '<div class="row-btns">' + btns + '</div>' : '') + '</div>';
   }
 
   function thumbHtml(x, t, selNo) {
@@ -786,12 +808,19 @@
         ' · <a target="_blank" rel="noopener" href="https://maps.google.com/?q=' + Number(x.Latitude) + ',' + Number(x.Longitude) + '">Peta</a>'
       : 'GPS tidak tersedia';
     var adminBtns = '';
-    if (isAdmin() && !x._qid) {
-      adminBtns = '<div class="row-btns">' +
-        '<button class="btn small ' + (L.bool(x.RetakeFlag) ? '' : 'warnbtn') + '" data-act="flag" data-id="' + esc(x.PhotoID) + '" data-field="RetakeFlag" data-val="' + (L.bool(x.RetakeFlag) ? 0 : 1) + '">' +
-        (L.bool(x.RetakeFlag) ? 'Buang tanda Ambil semula' : '🔁 Ambil semula') + '</button>' +
-        '<button class="btn small ghost" data-act="flag" data-id="' + esc(x.PhotoID) + '" data-field="Hidden" data-val="' + (L.bool(x.Hidden) ? 0 : 1) + '">' +
-        (L.bool(x.Hidden) ? '👁 Tunjuk semula' : '🚫 Sembunyikan') + '</button></div>';
+    if (!x._qid) {
+      var bt = [];
+      if (has('select_report_photos') && !L.bool(x.Hidden)) bt.push('<button class="btn small ghost" data-act="chooseReport" data-pole="' + esc(x.PoleID) + '" data-type="' + esc(x.PhotoTypeID) + '">★ Pilih untuk laporan</button>');
+      if (has('hide_photo')) {
+        bt.push('<button class="btn small ' + (L.bool(x.RetakeFlag) ? 'ghost' : 'warnbtn') + '" data-act="flag" data-id="' + esc(x.PhotoID) + '" data-field="RetakeFlag" data-val="' + (L.bool(x.RetakeFlag) ? 0 : 1) + '">' +
+          (L.bool(x.RetakeFlag) ? 'Buang tanda Ambil semula' : '🔁 Ambil semula') + '</button>');
+        bt.push('<button class="btn small ghost" data-act="flag" data-id="' + esc(x.PhotoID) + '" data-field="Hidden" data-val="' + (L.bool(x.Hidden) ? 0 : 1) + '">' +
+          (L.bool(x.Hidden) ? '👁 Tunjuk semula' : '🚫 Sorok') + '</button>');
+      }
+      if (has('edit_measurement') && t && t.NeedsMeasurement) bt.push('<button class="btn small ghost" data-act="measEdit" data-id="' + esc(x.PhotoID) + '">📏 Edit ukuran</button>');
+      if (has('move_photo')) bt.push('<button class="btn small ghost" data-act="moveOne" data-id="' + esc(x.PhotoID) + '">🔀 Pindah ke tiang…</button>');
+      if (has('delete_photo')) bt.push('<button class="btn small danger" data-act="photoDelete" data-id="' + esc(x.PhotoID) + '">🗑 Padam</button>');
+      if (bt.length) adminBtns = '<div class="row-btns">' + bt.join('') + '</div>';
     }
     openSheet('<div class="viewer"><div id="fullImg" class="full-img"><div class="spinner"></div></div>' +
       '<table class="kv">' +
@@ -909,43 +938,321 @@
       overlay(false);
       if (err.code === 'AUTH') showNeedLogin(true);
       alert(err.message);
+      err.shown = true; // already shown to the user: not an unhandled error
       throw err;
     });
   }
 
   function flagPhoto(id, field, val) {
     adminCall('setPhotoFlag', { photoId: id, field: field, value: val }).then(function (r) {
-      replacePhoto(r.photo); SolarDB.set('data', S.data); closeSheet(); render();
+      replacePhoto(r.photo); (r.photos || []).forEach(replacePhoto); SolarDB.set('data', S.data); closeSheet(); render();
     });
   }
+  // ---------------- photo / pole admin dialogs (v3) ----------------
+  function apiDone(r, msg) {
+    if (r.pole) replacePole(r.pole);
+    (r.photos || []).forEach(function (ph) {
+      if (S.data.photos.some(function (o) { return o.PhotoID === ph.PhotoID; })) replacePhoto(ph); else S.data.photos.push(ph);
+    });
+    SolarDB.set('data', S.data);
+    closeSheet(); render();
+    if (msg) toast(msg);
+    return r;
+  }
+
+  function deletePhotoDialog(photoId) {
+    var x = S.data.photos.filter(function (p) { return p.PhotoID === photoId; })[0];
+    if (!x) return;
+    openSheet('<h3>🗑 Padam gambar?</h3><p>' + esc(x.PoleID) + ' · ' + esc(typeName(x.PhotoTypeID)) + ' · ' + esc(fmtDT(x.CapturedAt)) + '</p>' +
+      '<p class="small">Gambar dibuang dari aplikasi dan dipindah ke <b>Trash Google Drive</b> (boleh dipulihkan dari Drive dalam 30 hari). ' +
+      (Number(x.ReportOrder) > 0 ? '<b>Pilihan laporan untuk jenis ini akan dikosongkan.</b> ' : '') + 'Dicatat dalam log.</p>' +
+      '<button class="btn block danger" data-act="photoDeleteYes" data-id="' + esc(photoId) + '">Ya, padam gambar</button>' +
+      '<button class="btn block ghost" data-act="closeSheet">Batal</button>');
+  }
+
+  function measEditDialog(photoId) {
+    var x = S.data.photos.filter(function (p) { return p.PhotoID === photoId; })[0];
+    if (!x) return;
+    openSheet('<h3>📏 Edit ukuran: ' + esc(typeName(x.PhotoTypeID)) + '</h3><p class="small">' + esc(x.PoleID) + ' · sekarang: ' +
+      (L.hasMeasurement(x) ? esc(L.formatMeasurement(x.MeasurementM)) + ' m' : 'tiada') + '</p>' +
+      '<div class="form"><label>Ukuran baru (meter)<input id="measIn" type="text" inputmode="decimal" value="' + esc(x.MeasurementM === '' ? '' : L.formatMeasurement(x.MeasurementM)) + '"></label></div>' +
+      '<div id="measErr" class="err" hidden></div>' +
+      '<button class="btn block" data-act="measEditSave" data-id="' + esc(photoId) + '">Simpan</button><button class="btn block ghost" data-act="closeSheet">Batal</button>');
+  }
+  function measEditSave(photoId) {
+    var r = L.parseMeasurement($('measIn').value);
+    if (!r.ok) { var el = $('measErr'); el.textContent = r.error; el.hidden = false; return; }
+    adminCall('editMeasurement', { photoId: photoId, value: $('measIn').value }).then(function (res) { apiDone({ photos: [res.photo] }, 'Ukuran dikemas kini'); });
+  }
+
+  /** Searchable pole picker used by move / swap. */
+  function polePicker(idAttr, exclude) {
+    return '<input id="' + idAttr + 'Q" type="search" placeholder="Cari ID tiang (cth. 35)" autocomplete="off">' +
+      '<select id="' + idAttr + '" size="6" class="picker">' + pickerOptions('', exclude) + '</select>';
+  }
+  function pickerOptions(q, exclude) {
+    return L.sortPolesByChainage(S.data.poles).filter(function (p) {
+      return !L.sameId(p.PoleID, exclude) && L.poleMatchesQuery(p.PoleID, q);
+    }).map(function (p) {
+      return '<option value="' + esc(p.PoleID) + '">' + esc(p.PoleID) + ' · ' + esc(p.Chainage) + ' · ' + esc(p.Bound) + (L.isActive(p) ? '' : ' (tidak aktif)') + '</option>';
+    }).join('');
+  }
+  function wirePicker(idAttr, exclude) {
+    var q = $(idAttr + 'Q');
+    if (q) q.oninput = function () { $(idAttr).innerHTML = pickerOptions(q.value, exclude); };
+  }
+
+  function moveDialog(poleId, preselect) {
+    var list = S.data.photos.filter(function (x) { return x.PoleID === poleId; })
+      .sort(function (a, b) { return (L.typeById(a.PhotoTypeID) || {}).Order - (L.typeById(b.PhotoTypeID) || {}).Order || (a.CapturedAt < b.CapturedAt ? -1 : 1); });
+    if (!list.length) { toast('Tiada gambar pada tiang ini.'); return; }
+    S.moveSel = {};
+    (preselect || []).forEach(function (id) { S.moveSel[id] = true; });
+    var types = L.photoTypes(S.data.types);
+    openSheet('<h3>🔀 Pindah gambar dari ' + esc(poleId) + '</h3><p class="small">1. Tanda gambar</p>' +
+      '<div class="move-list">' + list.map(function (x) {
+        var t = L.typeById(x.PhotoTypeID);
+        return '<label class="check"><input type="checkbox" data-act="msel" value="' + esc(x.PhotoID) + '"' + (S.moveSel[x.PhotoID] ? ' checked' : '') + '>' +
+          '<span class="mini">' + (S.thumbUrls[x.PhotoID] ? '<img src="' + esc(S.thumbUrls[x.PhotoID]) + '" alt="">' : '🖼️') + '</span>' +
+          '<span>' + esc(typeName(x.PhotoTypeID)) + (t && t.NeedsMeasurement && L.hasMeasurement(x) ? ' · ' + esc(L.formatMeasurement(x.MeasurementM)) + ' m' : '') +
+          (Number(x.ReportOrder) > 0 ? ' · ★' : '') + (L.bool(x.Hidden) ? ' · tersorok' : '') + '<br><span class="muted small">' + esc(fmtDT(x.CapturedAt)) + '</span></span></label>';
+      }).join('') + '</div>' +
+      '<p class="small">2. Tiang tujuan</p>' + polePicker('moveTarget', poleId) +
+      '<div class="form"><label>3. Jenis gambar di tiang tujuan<select id="moveType"><option value="">Sama seperti sekarang</option>' +
+      types.map(function (t) { return '<option value="' + t.TypeID + '">' + esc(actName(t.ActivityID)) + ' · ' + esc(t.Name) + '</option>'; }).join('') + '</select></label></div>' +
+      '<p class="muted small">Gambar ditambah kepada gambar sedia ada di tiang tujuan. Ukuran ikut sekali. Pilihan laporan bagi jenis yang terlibat dikosongkan.</p>' +
+      '<button class="btn block" data-act="moveSave" data-id="' + esc(poleId) + '">Pindah</button><button class="btn block ghost" data-act="closeSheet">Batal</button>');
+    wirePicker('moveTarget', poleId);
+  }
+  function moveSave() {
+    var ids = Object.keys(S.moveSel).filter(function (k) { return S.moveSel[k]; });
+    var target = $('moveTarget').value;
+    if (!ids.length) { toast('Tanda sekurang-kurangnya satu gambar.'); return; }
+    if (!target) { toast('Pilih tiang tujuan.'); return; }
+    if (!confirm('Pindah ' + ids.length + ' gambar ke ' + target + '?')) return;
+    adminCall('movePhotos', { photoIds: ids, targetPoleId: target, typeId: $('moveType').value }, 'Memindah gambar…', 120000).then(function (r) {
+      apiDone(r, ids.length + ' gambar dipindah ke ' + target);
+      refresh(true);
+    });
+  }
+
+  function swapDialog(poleId) {
+    openSheet('<h3>⇄ Tukar gambar antara 2 tiang</h3><p>Tiang A: <b>' + esc(poleId) + '</b></p><p class="small">Tiang B</p>' + polePicker('swapB', poleId) +
+      '<div class="form"><label>Aktiviti<select id="swapAct"><option value="">Semua aktiviti</option>' +
+      L.activities(S.data.activities).map(function (a) { return '<option value="' + a.ActivityID + '">' + esc(a.Name) + '</option>'; }).join('') + '</select></label></div>' +
+      '<p class="muted small">Semua gambar A pergi ke B dan B ke A dalam satu tindakan. Jika gagal, tiada apa berubah. Pilihan laporan ikut gambar.</p>' +
+      '<button class="btn block" data-act="swapSave" data-id="' + esc(poleId) + '">Tukar</button><button class="btn block ghost" data-act="closeSheet">Batal</button>');
+    wirePicker('swapB', poleId);
+  }
+  function swapSave(a) {
+    var b = $('swapB').value;
+    if (!b) { toast('Pilih tiang B.'); return; }
+    var act = $('swapAct').value;
+    if (!confirm('Tukar ' + (act ? 'gambar ' + actName(act) : 'SEMUA gambar') + ' antara ' + a + ' dan ' + b + '?')) return;
+    adminCall('swapPhotos', { poleA: a, poleB: b, activityId: act }, 'Menukar gambar…', 120000).then(function (r) {
+      apiDone(r, 'Gambar ' + a + ' ⇄ ' + b + ' ditukar');
+      refresh(true);
+    });
+  }
+
+  function overrideDialog(poleId) {
+    var p = poleById(merged(), poleId);
+    var cur = p.StatusOverride || '';
+    var opt = function (v, t) { return '<option value="' + v + '"' + (cur === v ? ' selected' : '') + '>' + esc(t) + '</option>'; };
+    openSheet('<h3>⚙️ Status kerja ' + esc(poleId) + '</h3><p class="small">Status kerja tidak bergantung pada gambar. Gambar hanya untuk tuntutan.</p>' +
+      '<div class="form"><label>Status<select id="ovStatus">' + opt('', 'Ikut automatik') + opt('NOT_STARTED', lab('NOT_STARTED')) +
+      opt('IN_PROGRESS', lab('IN_PROGRESS')) + opt('DONE', lab('DONE')) + '</select></label>' +
+      '<label>Tarikh siap sebenar<input id="ovDate" type="date" value="' + esc(p.ActualDate || '') + '"></label></div>' +
+      '<button class="btn block" data-act="overrideSave" data-id="' + esc(poleId) + '">Simpan</button><button class="btn block ghost" data-act="closeSheet">Batal</button>');
+  }
+
+  function rinDialog(poleId, act) {
+    var p = poleById(merged(), poleId);
+    openSheet('<h3>📄 No. RIN · ' + esc(actName(act)) + '</h3><p>' + esc(poleId) + '</p>' +
+      '<div class="form"><label>No. RIN (kosongkan untuk buang)<input id="rinIn" maxlength="60" value="' + esc(p[L.RIN_FIELD[act]] || '') + '"></label></div>' +
+      '<button class="btn block" data-act="rinSave" data-pole="' + esc(poleId) + '" data-act-id="' + act + '">Simpan</button><button class="btn block ghost" data-act="closeSheet">Batal</button>');
+  }
+
+  function poleDeleteDialog(poleId) {
+    var n = S.data.photos.filter(function (x) { return x.PoleID === poleId; }).length;
+    if (n) {
+      openSheet('<h3>🗑 Padam tiang ' + esc(poleId) + '</h3><p class="err">Pindah atau padam gambar dahulu (' + n + ' gambar).</p>' +
+        '<button class="btn block ghost" data-act="closeSheet">Tutup</button>');
+      return;
+    }
+    openSheet('<h3>🗑 Padam tiang ' + esc(poleId) + '?</h3><p class="small">Tiang dibuang dari senarai. Pelan kerja tiang ini dibuang; nota disimpan dalam Sheet. ' +
+      'Tindakan ini dicatat dalam log. Jika hanya mahu sembunyikan, guna <b>Nyahaktif</b>.</p>' +
+      '<div class="form"><label>Taip <b>' + esc(poleId) + '</b> untuk sahkan<input id="delConfirm" autocomplete="off"></label></div>' +
+      '<button class="btn block danger" data-act="poleDeleteYes" data-id="' + esc(poleId) + '">Padam tiang</button><button class="btn block ghost" data-act="closeSheet">Batal</button>');
+  }
+
+  /** Save with "same CH + bound" warning: server answers {needsConfirm, warnings}; ask, then resend with confirm. */
+  function saveWithWarning(action, params, doneFn) {
+    return adminCall(action, params).then(function (r) {
+      if (r.needsConfirm) {
+        if (!confirm('⚠️ ' + r.warnings.join('\n') + '\n\nSimpan juga?')) return null;
+        return adminCall(action, Object.assign({}, params, { confirm: true })).then(doneFn);
+      }
+      return doneFn(r);
+    });
+  }
+
   // =================================================================
   // Admin — pole editor
   // =================================================================
   function renderPoleEdit(id) {
     var p = poleById(merged(), id);
-    if (!isAdmin() || !p) return go('#/tiang/' + id);
-    setChrome('Edit ' + id, '#/tiang/' + id, 'jadual');
-    function opt(v, cur) { return '<option' + (v === cur ? ' selected' : '') + '>' + esc(v) + '</option>'; }
+    if (!has('edit_pole') || !p) return go('#/tiang/' + encodeURIComponent(id));
+    setChrome('Edit ' + id, '#/tiang/' + encodeURIComponent(id), 'jadual');
+    function opt(v, cur, label) { return '<option value="' + esc(v) + '"' + (v === cur ? ' selected' : '') + '>' + esc(label || v) + '</option>'; }
     $('view').innerHTML = '<form class="card form" id="poleForm">' +
+      '<label>ID tiang<input name="PoleID" value="' + esc(p.PoleID) + '" maxlength="20" required></label>' +
+      '<div class="muted small">Menukar ID mengemas kini semua gambar, nota, pelan, laporan dan folder Drive. ID tidak boleh sama dengan tiang lain.</div>' +
       '<label>Chainage<input name="Chainage" value="' + esc(p.Chainage) + '" required></label>' +
       '<div class="muted small">Format tepat: CH. + 5 digit, cth. CH.41450</div>' +
       '<label>Bound<select name="Bound">' + opt('EB', p.Bound) + opt('WB', p.Bound) + '</select></label>' +
-      '<label>Tarikh rancang<input name="PlannedDate" type="date" value="' + esc(p.PlannedDate) + '"></label>' +
-      '<label>Kategori<select name="Category">' + L.CATEGORIES.map(function (c) { return opt(c, p.Category); }).join('') + '</select></label>' +
+      '<label>Kategori<select name="Category">' + L.CATEGORIES.map(function (c) { return opt(c, p.Category, catLabel(c)); }).join('') + '</select></label>' +
+      '<label>Tarikh siap sebenar<input name="ActualDate" type="date" value="' + esc(p.ActualDate || '') + '"></label>' +
+      L.activities(S.data.activities).map(function (a) {
+        var f = L.RIN_FIELD[a.ActivityID];
+        return '<label>No. RIN · ' + esc(a.Name) + '<input name="' + f + '" maxlength="60" value="' + esc(p[f] || '') + '"></label>';
+      }).join('') +
+      '<div id="editErr" class="err" hidden></div>' +
       '<button class="btn block" type="submit">Simpan</button></form>';
     $('poleForm').onsubmit = function (ev) {
       ev.preventDefault();
       var f = ev.target;
       var changes = {};
-      ['Chainage', 'Bound', 'PlannedDate', 'Category'].forEach(function (k) {
+      ['PoleID', 'Chainage', 'Bound', 'Category', 'ActualDate', 'RINPegging', 'RINTrialPit', 'RINInstallation'].forEach(function (k) {
         var v = f[k].value.trim();
         if (v !== String(p[k] || '')) changes[k] = v;
       });
-      if (!Object.keys(changes).length) return go('#/tiang/' + id);
-      adminCall('editPole', { poleId: id, changes: changes }).then(function (r) {
-        replacePole(r.pole); SolarDB.set('data', S.data); toast('Disimpan'); go('#/tiang/' + id); refresh(true);
-      });
+      if (!Object.keys(changes).length) return go('#/tiang/' + encodeURIComponent(id));
+      if ('PoleID' in changes) {
+        var v = L.validatePoleId(changes.PoleID);
+        var dup = v.ok && S.data.poles.filter(function (o) { return o.PoleID !== p.PoleID && L.sameId(o.PoleID, v.id); })[0];
+        var err = !v.ok ? v.error : dup ? 'ID tiang "' + v.id + '" sudah digunakan oleh tiang ' + dup.PoleID + '.' : '';
+        if (err) { var el = $('editErr'); el.textContent = err; el.hidden = false; return; }
+        if (!confirm('Tukar ID ' + p.PoleID + ' → ' + v.id + '? Semua rujukan akan dikemas kini.')) return;
+      }
+      saveWithWarning('editPole', { poleId: id, changes: changes }, function (r) {
+        if (!r) return;
+        refresh(true);
+        toast('Disimpan');
+        go('#/tiang/' + encodeURIComponent(r.pole.PoleID));
+      }).catch(function () { /* shown */ });
     };
+  }
+
+  function renderAddPole() {
+    setChrome('Tambah tiang', '#/admin', 'admin');
+    $('view').innerHTML = '<form class="card form" id="addPole">' +
+      '<label>ID tiang<input name="poleId" maxlength="20" required placeholder="cth. SSL124 atau SSL999 (sementara)"></label>' +
+      '<label>Chainage<input name="chainage" required placeholder="CH.41450"></label>' +
+      '<label>Bound<select name="bound"><option>EB</option><option>WB</option></select></label>' +
+      '<label>Kategori<select name="category">' + L.CATEGORIES.map(function (c) { return '<option value="' + esc(c) + '">' + esc(catLabel(c)) + '</option>'; }).join('') + '</select></label>' +
+      '<label>Nota (pilihan)<textarea name="note" rows="2"></textarea></label>' +
+      '<div id="addErr" class="err" hidden></div><button class="btn block" type="submit">Tambah tiang</button></form>';
+    $('addPole').onsubmit = function (ev) {
+      ev.preventDefault();
+      var f = ev.target;
+      var v = L.validatePoleId(f.poleId.value);
+      var dup = v.ok && S.data.poles.filter(function (o) { return L.sameId(o.PoleID, v.id); })[0];
+      var err = !v.ok ? v.error : dup ? 'ID tiang "' + v.id + '" sudah digunakan oleh tiang ' + dup.PoleID + '.' : '';
+      if (err) { var el = $('addErr'); el.textContent = err; el.hidden = false; return; }
+      saveWithWarning('addPole', { poleId: v.id, chainage: f.chainage.value, bound: f.bound.value, category: f.category.value, note: f.note.value }, function (r) {
+        if (!r) return;
+        S.data.poles.push(r.pole); SolarDB.set('data', S.data); refresh(true);
+        toast('Tiang ' + r.pole.PoleID + ' ditambah');
+        go('#/tiang/' + encodeURIComponent(r.pole.PoleID));
+      }).catch(function () { /* shown */ });
+    };
+  }
+
+  // ---------------- import / export ----------------
+  function loadXlsxLib() {
+    if (window.XLSX) return Promise.resolve(window.XLSX);
+    return new Promise(function (resolve, reject) {
+      var s = document.createElement('script');
+      s.src = 'lib/xlsx.full.min.js';
+      s.onload = function () { resolve(window.XLSX); };
+      s.onerror = function () { reject(new Error('Gagal memuatkan pembaca Excel. Semak line internet.')); };
+      document.head.appendChild(s);
+    });
+  }
+  /** first sheet -> [{PoleID, Chainage, Bound, Category}] using flexible header names */
+  function rowsFromSheet(XLSX, wb) {
+    var raw = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: '', raw: false });
+    var hi = raw.findIndex(function (r) { return r.some(function (c) { return /pole\s*id|light\s*id|id\s*tiang/i.test(String(c)); }); });
+    if (hi < 0) throw new Error('Lajur "Pole ID" tidak dijumpai di baris tajuk.');
+    var head = raw[hi].map(function (h) { return String(h).trim().toLowerCase(); });
+    var col = function (re) { for (var i = 0; i < head.length; i++) if (re.test(head[i])) return i; return -1; };
+    var c = { id: col(/pole\s*id|light\s*id|id\s*tiang/), ch: col(/^ch|chainage/), b: col(/bound/), cat: col(/categ|kategori|work\s*area/) };
+    if (c.ch < 0 || c.b < 0) throw new Error('Lajur CH / Chainage dan Bound diperlukan.');
+    return raw.slice(hi + 1).filter(function (r) { return r.some(function (x) { return String(x).trim(); }); }).map(function (r) {
+      return { PoleID: r[c.id], Chainage: r[c.ch], Bound: r[c.b], Category: c.cat >= 0 ? r[c.cat] : '' };
+    });
+  }
+
+  function renderImport() {
+    setChrome('Import tiang', '#/admin', 'admin');
+    var imp = S.imp || {};
+    var rows = imp.preview || [];
+    var cnt = function (st) { return rows.filter(function (r) { return r.status === st; }).length; };
+    $('view').innerHTML = '<section class="card"><p class="small">Fail Excel (.xlsx) atau CSV dengan lajur <b>Pole ID, CH, Bound, Category</b>. ' +
+      'Category: Perlu pasang / Tunggu kelulusan / Sudah dipasang (kosong = Perlu pasang).</p>' +
+      '<button class="btn small ghost" data-act="importTemplate">⬇ Templat</button>' +
+      '<input id="importFile" type="file" accept=".xlsx,.xls,.csv"></section>' +
+      (rows.length ? '<section class="card"><h3>Pratonton (belum disimpan)</h3>' +
+        '<p class="small">Baru: <b>' + cnt('new') + '</b> · Sudah ada: <b>' + cnt('exists') + '</b> · Ralat: <b class="err-text">' + cnt('error') + '</b> (tidak akan disimpan)</p>' +
+        '<div class="imp-table"><table class="audit"><tbody>' + rows.map(function (r) {
+          return '<tr class="imp-' + r.status + '"><td>' + r.row + '</td><td><b>' + esc(r.PoleID || '—') + '</b><br><span class="small">' + esc(r.Chainage) + ' · ' + esc(r.Bound) + ' · ' + esc(r.Category || '') + '</span>' +
+            (r.errors.length ? '<div class="err small">' + esc(r.errors.join(' ')) + '</div>' : '') +
+            (r.warnings.length ? '<div class="small warn-text">⚠️ ' + esc(r.warnings.join(' ')) + '</div>' : '') + '</td><td>' +
+            ({ new: 'Baru', exists: 'Sudah ada', error: 'Ralat' })[r.status] + '</td></tr>';
+        }).join('') + '</tbody></table></div>' +
+        (cnt('exists') ? '<div class="form"><label>Tiang yang sudah ada<select id="impExisting"><option value="">— pilih —</option>' +
+          '<option value="skip">Langkau (jangan ubah)</option><option value="update">Kemas kini CH / Bound / Kategori</option></select></label></div>' : '') +
+        '<button class="btn block" data-act="importSave"' + (cnt('new') + cnt('exists') ? '' : ' disabled') + '>Import ' + (cnt('new') + cnt('exists')) + ' baris</button>' +
+        '<button class="btn block ghost" data-act="importReset">Batal</button></section>' : '');
+    $('importFile').onchange = function (e) {
+      var file = e.target.files[0];
+      if (!file) return;
+      overlay('Membaca fail…');
+      loadXlsxLib().then(function (XLSX) {
+        return file.arrayBuffer().then(function (buf) { return rowsFromSheet(XLSX, XLSX.read(buf, { type: 'array' })); });
+      }).then(function (input) {
+        overlay(false);
+        return adminCall('importPreview', { rows: input }, 'Menyemak…').then(function (r) { S.imp = { input: input, preview: r.rows }; render(); });
+      }).catch(function (err) { overlay(false); alert(err.message); });
+    };
+  }
+
+  function importSave() {
+    var imp = S.imp;
+    var onEx = $('impExisting') ? $('impExisting').value : 'skip';
+    if ($('impExisting') && !onEx) { toast('Pilih: langkau atau kemas kini tiang yang sudah ada.'); return; }
+    if (!confirm('Import sekarang?')) return;
+    adminCall('importPoles', { rows: imp.input, onExisting: onEx }, 'Mengimport…', 120000).then(function (r) {
+      S.imp = null; S.data.poles = r.poles; SolarDB.set('data', S.data);
+      alert('Import selesai: ' + r.added + ' baru, ' + r.updated + ' dikemas kini, ' + r.skipped + ' dilangkau, ' + r.errors + ' ralat (tidak disimpan).');
+      go('#/admin');
+    });
+  }
+
+  function downloadB64(b64, name, mime) {
+    var bin = atob(b64); var arr = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+    var url = URL.createObjectURL(new Blob([arr], { type: mime }));
+    var a = document.createElement('a');
+    a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
+  }
+  function exportData() {
+    adminCall('exportPoles', {}, 'Menyediakan fail Excel…', 120000).then(function (r) {
+      downloadB64(r.b64, r.name, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      toast(r.count + ' tiang dieksport');
+    });
   }
 
   // =================================================================
@@ -953,81 +1260,144 @@
   // =================================================================
   function reportMax(act) { return Math.max(1, Math.floor((S.data.reportMaxPhotos || 60) / L.reportPhotoCount(act))); }
 
+  var REPORT_STATUS = {
+    ready: ['✅', 'Sedia', 'ok-text'], choose: ['⚠️', 'Perlu pilih gambar', 'warn-text'],
+    short: ['⚠️', 'Kurang gambar', 'err-text'], reported: ['📄', 'Dah dilaporkan', 'muted']
+  };
+
   function renderReports() {
     setChrome('Laporan', '', 'laporan');
     var reps = (S.data.reports || []).map(function (r) {
       var label = r.Activity ? actName(r.Activity) : 'Laporan lama';
       return '<li><div><b>' + esc(label) + '</b> · ' + esc(r.PoleIDs) +
         '<div class="muted small">' + esc(fmtDT(r.CreatedAt)) + ' · ' + esc(nameOf(r.CreatedBy)) + '</div></div>' +
-        '<div class="row-btns"><button class="btn small" data-act="download" data-id="' + esc(r.ReportID) + '" data-format="pdf">⬇ PDF</button>' +
-        (r.DocxURL ? '<button class="btn small ghost" data-act="download" data-id="' + esc(r.ReportID) + '" data-format="docx">⬇ Word</button>' : '') +
-        '</div></li>';
+        (has('download_report') ? '<div class="row-btns"><button class="btn small" data-act="download" data-id="' + esc(r.ReportID) + '" data-format="pdf">⬇ PDF</button>' +
+          (r.DocxURL ? '<button class="btn small ghost" data-act="download" data-id="' + esc(r.ReportID) + '" data-format="docx">⬇ Word</button>' : '') + '</div>' : '') + '</li>';
     }).join('');
-    var gen = '';
-    if (allowed('generateReport')) {
-      var m = merged();
-      var rf = S.reportFilter;
-      var act = S.rAct || 'A';
-      var max = reportMax(act);
-      var list = m.poles.slice().sort(function (a, b) { return a.PoleID < b.PoleID ? -1 : 1; }).filter(function (p) {
-        return (rf.bound === 'all' || p.Bound === rf.bound) && (rf.cat === 'all' || p.Category === rf.cat);
-      });
-      var nSel = Object.keys(S.reportSel).filter(function (k) { return S.reportSel[k]; }).length;
-      var chip = function (group, val, label) {
-        return '<button class="chip' + (rf[group] === val ? ' on' : '') + '" data-act="rfilter" data-group="' + group + '" data-val="' + esc(val) + '">' + esc(label) + '</button>';
-      };
-      gen = '<section class="card"><h3>Jana laporan gambar</h3>' +
-        '<div class="small muted">1. Pilih aktiviti</div><div class="seg">' + m.acts.map(function (a) {
-          return '<button class="seg-btn' + (act === a.ActivityID ? ' on' : '') + '" data-act="ract" data-val="' + a.ActivityID + '">' + esc(a.Name) + '</button>';
-        }).join('') + '</div>' +
-        '<div class="small muted">2. Tandakan tiang (disusun ikut ID)</div>' +
-        '<div class="chips">' + chip('bound', 'all', 'Semua') + chip('bound', 'EB', 'EB') + chip('bound', 'WB', 'WB') + '</div>' +
-        '<div class="chips">' + chip('cat', 'all', 'Semua kategori') + L.CATEGORIES.map(function (c) { return chip('cat', c, c); }).join('') + '</div>' +
-        '<div class="row-btns"><button class="btn small ghost" data-act="rselReady">Tanda semua yang sedia</button>' +
-        '<button class="btn small ghost" data-act="rselNone">Kosongkan</button></div>' +
-        '<div class="muted small">Dipilih: <b id="nSel">' + nSel + '</b> / maksimum ' + max + ' tiang bagi laporan ' + esc(actName(act)) + '</div>' +
-        '<div class="checklist">' + list.map(function (p) {
-          var miss = L.reportMissing(act, p.PoleID, m.types, m.statusPhotos);
-          return '<label class="check"><input type="checkbox" data-act="rsel" value="' + esc(p.PoleID) + '"' + (S.reportSel[p.PoleID] ? ' checked' : '') + '> ' +
-            '<span><b>' + esc(p.PoleID) + '</b> <span class="small">' + esc(p.Chainage) + ' · ' + esc(p.Bound) + '</span><br>' +
-            (miss.length ? '<span class="small warn-text">⚠️ ' + esc(miss.join(', ')) + '</span>' : '<span class="small ok-text">✅ sedia</span>') + '</span></label>';
-        }).join('') + '</div>' +
-        '<button class="btn block" data-act="genReport">📄 Jana laporan ' + esc(actName(act)) + ' (PDF + Word)</button>' +
-        '<p class="muted small">Gambar: pilihan admin (★) jika ada; jika tiada, gambar terkini yang tidak ditanda Ambil semula. ' +
-        'Hanya halaman gambar — borang RIN ditambah sendiri.</p></section>';
-    }
-    $('view').innerHTML = gen + '<section class="card"><h3>Laporan dijana</h3>' +
-      (reps ? '<ul class="replist">' + reps + '</ul>' : '<p class="muted">Belum ada laporan.</p>') + '</section>';
+    var gen = has('generate_report') ? reportGenerator() : '';
+    $('view').innerHTML = gen + (has('download_report') || reps ? '<section class="card"><h3>Laporan dijana</h3>' +
+      (reps ? '<ul class="replist">' + reps + '</ul>' : '<p class="muted">Belum ada laporan.</p>') + '</section>' : '');
+    var q = $('rq');
+    if (q) q.oninput = function () {
+      S.rf.q = q.value;
+      var pos = q.selectionStart;
+      render();
+      var q2 = $('rq'); q2.focus(); try { q2.setSelectionRange(pos, pos); } catch (e) { /* ignore */ }
+    };
+    ['rfrom', 'rto'].forEach(function (id) { var el = $(id); if (el) el.onchange = function () { S.rf[id === 'rfrom' ? 'from' : 'to'] = el.value; render(); }; });
+  }
+
+  /** Poles for the chosen activity that have at least one photo of it, with their report status (sorted by chainage). */
+  function reportRows(act) {
+    var m = merged();
+    var server = m.photos.filter(function (x) { return !x._qid; });
+    var rf = S.rf;
+    var inAct = function (x) { var t = L.typeById(x.PhotoTypeID); return t && t.ActivityID === act && !L.bool(x.Hidden); };
+    return L.sortPolesByChainage(m.poles.filter(L.isActive)).map(function (p) {
+      var st = L.poleReportStatus(act, p, m.types, server);
+      return { pole: p, st: st };
+    }).filter(function (r) {
+      if (!r.st.hasPhotos) return false;
+      if (rf.bound !== 'all' && r.pole.Bound !== rf.bound) return false;
+      if (rf.q && !L.poleMatchesQuery(r.pole.PoleID, rf.q)) return false;
+      if (r.st.status === 'reported' && !rf.showReported) return false;
+      if (rf.from || rf.to) {
+        var ok = server.some(function (x) {
+          if (x.PoleID !== r.pole.PoleID || !inAct(x)) return false;
+          var d = String(x.CapturedAt).slice(0, 10);
+          return (!rf.from || d >= rf.from) && (!rf.to || d <= rf.to);
+        });
+        if (!ok) return false;
+      }
+      return true;
+    });
+  }
+
+  function reportGenerator() {
+    var m = merged();
+    var act = S.rAct || 'A';
+    var max = reportMax(act);
+    var rf = S.rf;
+    var rows = reportRows(act);
+    Object.keys(S.reportSel).forEach(function (id) {   // a pole that is no longer Sedia cannot stay ticked
+      if (S.reportSel[id] && !rows.some(function (r) { return r.pole.PoleID === id && r.st.ready; })) delete S.reportSel[id];
+    });
+    var nSel = Object.keys(S.reportSel).filter(function (k) { return S.reportSel[k]; }).length;
+    var chip = function (val, label) {
+      return '<button class="chip' + (rf.bound === val ? ' on' : '') + '" data-act="rbound" data-val="' + val + '">' + label + '</button>';
+    };
+    var counts = { ready: 0, choose: 0, short: 0, reported: 0 };
+    rows.forEach(function (r) { counts[r.st.status]++; });
+    return '<section class="card"><h3>Jana laporan gambar</h3>' +
+      '<div class="seg">' + m.acts.map(function (a) {
+        return '<button class="seg-btn' + (act === a.ActivityID ? ' on' : '') + '" data-act="ract" data-val="' + a.ActivityID + '">' + esc(a.Name) + '</button>';
+      }).join('') + '</div>' +
+      '<input id="rq" type="search" placeholder="Cari ID tiang (cth. 34)" value="' + esc(rf.q) + '" autocomplete="off">' +
+      '<div class="chips">' + chip('all', 'Semua') + chip('EB', 'EB') + chip('WB', 'WB') + '</div>' +
+      '<div class="daterange"><label>Gambar dari<input id="rfrom" type="date" value="' + esc(rf.from) + '"></label>' +
+      '<label>hingga<input id="rto" type="date" value="' + esc(rf.to) + '"></label></div>' +
+      '<label class="check small"><input type="checkbox" data-act="rshowReported"' + (rf.showReported ? ' checked' : '') + '> Tunjuk yang dah dilaporkan</label>' +
+      '<div class="small muted">✅ ' + counts.ready + ' sedia · ⚠️ ' + counts.choose + ' perlu pilih · ⚠️ ' + counts.short + ' kurang' +
+      (rf.showReported ? ' · 📄 ' + counts.reported + ' dah dilaporkan' : '') + '</div>' +
+      '<div class="row-btns"><button class="btn small ghost" data-act="rselReady">Pilih semua yang sedia</button>' +
+      '<button class="btn small ghost" data-act="rselNone">Kosongkan</button></div>' +
+      '<div class="muted small">Dipilih: <b id="nSel">' + nSel + '</b> / maksimum ' + max + ' tiang</div>' +
+      '<div class="checklist rlist">' + (rows.map(function (r) {
+        var s = REPORT_STATUS[r.st.status];
+        var detail = r.st.status === 'reported' ? 'RIN ' + r.st.rin + (r.st.ready ? ' · gambar sedia' : '')
+          : r.st.status === 'ready' ? '' : L.reportMissing(act, r.pole.PoleID, m.types, m.photos.filter(function (x) { return !x._qid; })).join(', ');
+        return '<div class="rrow">' +
+          '<input type="checkbox" data-act="rsel" value="' + esc(r.pole.PoleID) + '"' + (S.reportSel[r.pole.PoleID] ? ' checked' : '') + (r.st.ready ? '' : ' disabled') + '>' +
+          '<div class="rrow-main"' + (r.st.status === 'choose' && has('select_report_photos') ? ' data-act="rchoose" data-id="' + esc(r.pole.PoleID) + '"' : '') + '>' +
+          '<b>' + esc(r.pole.PoleID) + '</b> <span class="small">' + esc(r.pole.Chainage) + ' · ' + esc(r.pole.Bound) + '</span><br>' +
+          '<span class="small ' + s[2] + '">' + s[0] + ' ' + s[1] + '</span>' + (detail ? ' <span class="small muted">— ' + esc(detail) + '</span>' : '') +
+          (r.st.status === 'choose' && has('select_report_photos') ? ' <span class="small link">Pilih ›</span>' : '') + '</div></div>';
+      }).join('') || '<p class="muted center">Tiada tiang dengan gambar ' + esc(actName(act)) + '.</p>') + '</div>' +
+      (has('record_rin') ? '<div class="form"><label>No. RIN (pilihan)<input id="rinGen" maxlength="60" placeholder="cth. RIN/TP/012" value="' + esc(S.rinDraft || '') + '"></label></div>' : '') +
+      '<button class="btn block" data-act="genReport"' + (nSel ? '' : ' disabled') + '>📄 Jana laporan ' + esc(actName(act)) + ' (PDF + Word)</button>' +
+      '<p class="muted small">Hanya tiang <b>Sedia</b> boleh ditanda. Gambar dipilih automatik hanya jika bilangan tepat; jika lebih, pilih dahulu. ' +
+      'Hanya halaman gambar — borang RIN ditambah sendiri.</p></section>';
+  }
+
+  /** "Perlu pilih gambar": list the photo types of that pole that need a choice. */
+  function chooseForReport(poleId) {
+    var act = S.rAct || 'A';
+    var m = merged();
+    var p = poleById(m, poleId);
+    var st = L.poleReportStatus(act, p, m.types, m.photos.filter(function (x) { return !x._qid; }));
+    S.afterChoose = '#/laporan';
+    openSheet('<h3>Pilih gambar · ' + esc(poleId) + '</h3>' + st.choose.map(function (x) {
+      return '<button class="btn block ghost" data-act="chooseReport" data-pole="' + esc(poleId) + '" data-type="' + x.type.TypeID + '">' +
+        esc(typeName(x.type.TypeID)) + ' — pilih ' + x.need + ' daripada ' + x.good + '</button>';
+    }).join('') + '<button class="btn block ghost" data-act="closeSheet">Tutup</button>');
   }
 
   function generateReport() {
     var act = S.rAct || 'A';
     var ids = Object.keys(S.reportSel).filter(function (k) { return S.reportSel[k]; }).sort();
     var max = reportMax(act);
-    if (!ids.length) { toast('Pilih sekurang-kurangnya satu tiang.'); return; }
+    if (!ids.length) { toast('Pilih sekurang-kurangnya satu tiang yang Sedia.'); return; }
     if (ids.length > max) { toast('Maksimum ' + max + ' tiang bagi satu laporan ' + actName(act) + '.'); return; }
+    var rin = $('rinGen') ? $('rinGen').value.trim() : '';
+    var msg = 'Jana laporan ' + actName(act) + ' untuk ' + ids.length + ' tiang' + (rin ? ' dan simpan No. RIN "' + rin + '"' : '') + '?';
+    if (!confirm(msg)) return;
     adminCall('reportCheck', { activityId: act, poleIds: ids }, 'Menyemak gambar…').then(function (r) {
-      if (!r.missing.length) return doGenerate(act, ids);
-      S.pendingReport = { act: act, ids: r.ready };
-      openSheet('<h3>⚠️ Gambar belum lengkap</h3><p class="small">Tiang berikut tidak cukup gambar/ukuran untuk laporan ' + esc(actName(act)) + ':</p>' +
-        '<ul class="warnlist">' + r.missing.map(function (x) {
+      if (r.missing.length) {
+        openSheet('<h3>⚠️ Tidak sedia</h3><ul class="warnlist">' + r.missing.map(function (x) {
           return '<li><b>' + esc(x.PoleID) + '</b> — ' + esc(x.missing.join(', ')) + '</li>';
-        }).join('') + '</ul>' +
-        (r.ready.length ? '<button class="btn block" data-act="genContinue">Teruskan tanpa tiang ini (' + r.ready.length + ' tiang)</button>'
-          : '<p class="err">Tiada tiang yang lengkap.</p>') +
-        '<button class="btn block ghost" data-act="closeSheet">Batal</button>');
+        }).join('') + '</ul><p class="small">Gambar mungkin berubah. Muat semula dan semak semula.</p><button class="btn block ghost" data-act="closeSheet">Tutup</button>');
+        refresh(true);
+        return;
+      }
+      return adminCall('generateReport', { activityId: act, poleIds: ids, rin: rin }, 'Menjana laporan… (boleh ambil 1–3 minit, jangan tutup aplikasi)', 360000).then(function (res) {
+        S.data.reports = [res.report].concat(S.data.reports || []);
+        (res.poles || []).forEach(replacePole);
+        S.reportSel = {}; S.rinDraft = '';
+        SolarDB.set('data', S.data);
+        render();
+        toast('📄 Laporan siap (PDF + Word)' + (rin ? ' · RIN disimpan' : ''));
+      });
     }, function () { /* message already shown */ });
-  }
-
-  function doGenerate(act, ids) {
-    closeSheet();
-    return adminCall('generateReport', { activityId: act, poleIds: ids }, 'Menjana laporan… (boleh ambil 1–3 minit, jangan tutup aplikasi)', 360000).then(function (r) {
-      S.data.reports = [r.report].concat(S.data.reports || []);
-      S.reportSel = {};
-      SolarDB.set('data', S.data);
-      render();
-      toast('📄 Laporan siap (PDF + Word)');
-    });
   }
 
   function downloadReport(id, format) {
@@ -1063,32 +1433,41 @@
   // =================================================================
   function renderAdminMenu() {
     setChrome('Admin', '', 'admin');
+    var item = function (key, href, icon, title, sub, act) {
+      if (!has(key)) return '';
+      return (act ? '<button class="card menu-item" data-act="' + act + '">' : '<a class="card menu-item" href="' + href + '">') + icon +
+        ' <div><b>' + title + '</b><div class="muted small">' + sub + '</div></div>' + (act ? '</button>' : '</a>');
+    };
     $('view').innerHTML = '<div class="menu">' +
-      '<a class="card menu-item" href="#/admin/pengguna">👥 <div><b>Pengguna</b><div class="muted small">Tambah / buang Gmail, tetapkan peranan</div></div></a>' +
-      '<a class="card menu-item" href="#/admin/tetapan">🧩 <div><b>Aktiviti & jenis gambar</b><div class="muted small">Nama dan spesifikasi</div></div></a>' +
-      '<a class="card menu-item" href="#/admin/log">🧾 <div><b>Log audit</b><div class="muted small">Semua perubahan</div></div></a>' +
-      '<a class="card menu-item" href="#/laporan">📄 <div><b>Laporan</b><div class="muted small">Pegging / Trial Pit / Installation (PDF + Word)</div></div></a>' +
-      '<a class="card menu-item" href="#/jadual">📅 <div><b>Pelan kerja</b><div class="muted small">Jadual → tanda tiang → Rancang kerja</div></div></a>' +
-      '<a class="card menu-item" href="#/jadual">✏️ <div><b>Edit tiang</b><div class="muted small">Buka tiang dari jadual, tekan "Edit tiang"</div></div></a>' +
+      item('manage_users', '#/admin/pengguna', '👥', 'Pengguna', 'Tambah / buang Gmail, tetapkan peranan') +
+      item('manage_roles', '#/admin/peranan', '🛡️', 'Peranan', 'Cipta peranan dan pilih kebenaran') +
+      item('edit_settings', '#/admin/tetapan', '🏷️', 'Tetapan & label', 'Label status, kad dashboard, aktiviti & jenis gambar') +
+      item('add_pole', '#/admin/tiang-baru', '➕', 'Tambah tiang', 'ID, CH, bound, kategori') +
+      item('import_poles', '#/admin/import', '📥', 'Import tiang', 'Excel / CSV dengan pratonton') +
+      item('export_data', '', '📤', 'Eksport data (Excel)', 'Semua tiang, status, tarikh, RIN', 'exportData') +
+      item('view_audit_log', '#/admin/log', '🧾', 'Log audit', 'Semua perubahan') +
       '</div>';
+  }
+
+  function roleOptions(cur) {
+    return (S.data.roles || []).filter(function (r) { return r.Active || L.sameId(r.RoleName, cur); }).map(function (r) {
+      return '<option value="' + esc(r.RoleName) + '"' + (L.sameId(r.RoleName, cur) ? ' selected' : '') + '>' + esc(r.RoleName) + (r.Active ? '' : ' (tidak aktif)') + '</option>';
+    }).join('');
   }
 
   function renderUsers() {
     setChrome('Pengguna', '#/admin', 'admin');
     var users = S.data.users || [];
-    var roleSel = function (cur) {
-      return L.ROLES.map(function (r) { return '<option' + (r === cur ? ' selected' : '') + '>' + r + '</option>'; }).join('');
-    };
     $('view').innerHTML = '<section class="card"><h3>Tambah pengguna</h3><form id="addUser" class="form">' +
       '<label>Emel Gmail<input name="email" type="email" required autocomplete="off"></label>' +
       '<label>Nama<input name="name" autocomplete="off"></label>' +
-      '<label>Peranan<select name="role">' + roleSel('Team') + '</select></label>' +
+      '<label>Peranan<select name="role">' + roleOptions('Team') + '</select></label>' +
       '<button class="btn" type="submit">Tambah</button></form></section>' +
       '<section class="card"><h3>Senarai pengguna</h3>' + users.map(function (u) {
         return '<form class="user-row form" data-email="' + esc(u.Email) + '">' +
           '<div><b>' + esc(u.Email) + '</b></div>' +
           '<label>Nama<input name="name" value="' + esc(u.Name) + '"></label>' +
-          '<label>Peranan<select name="role">' + roleSel(u.Role) + '</select></label>' +
+          '<label>Peranan<select name="role">' + roleOptions(u.Role) + '</select></label>' +
           '<label class="check"><input type="checkbox" name="active"' + (u.Active ? ' checked' : '') + '> Aktif</label>' +
           '<div class="row-btns"><button class="btn small" type="submit">Simpan</button>' +
           '<button class="btn small danger" type="button" data-act="removeUser" data-email="' + esc(u.Email) + '">Buang</button></div></form>';
@@ -1109,21 +1488,74 @@
     });
   }
 
+  function renderRoles() {
+    setChrome('Peranan', '#/admin', 'admin');
+    var roles = S.data.roles || [];
+    var users = S.data.users || [];
+    var form = function (r, isNew) {
+      var builtIn = r && r.BuiltIn;
+      var permsOf = r ? r.Permissions : [];
+      var n = r ? users.filter(function (u) { return L.sameId(u.Role, r.RoleName); }).length : 0;
+      return '<form class="card form role-form" data-orig="' + esc(r ? r.RoleName : '') + '">' +
+        (isNew ? '<h3>➕ Peranan baru</h3>' : '<div class="role-head"><b>' + esc(r.RoleName) + '</b> <span class="muted small">' + n + ' pengguna' +
+          (builtIn ? ' · terbina dalam, semua kebenaran' : r.Active ? '' : ' · <span class="err-text">tidak aktif</span>') + '</span></div>') +
+        (builtIn ? '' : '<label>Nama peranan<input name="name" maxlength="30" value="' + esc(r ? r.RoleName : '') + '" required></label>') +
+        '<div class="perm-grid">' + L.PERMISSIONS.map(function (p) {
+          return '<label class="check"><input type="checkbox" name="perm" value="' + p.key + '"' + (builtIn || permsOf.indexOf(p.key) >= 0 ? ' checked' : '') +
+            (builtIn ? ' disabled' : '') + '> ' + esc(p.label) + '</label>';
+        }).join('') + '</div>' +
+        (builtIn ? '' : '<label class="check"><input type="checkbox" name="active"' + (!r || r.Active ? ' checked' : '') + '> Aktif' +
+          (n ? ' <span class="muted small">(nyahaktif = ' + n + ' pengguna tidak boleh log masuk)</span>' : '') + '</label>' +
+          '<button class="btn small" type="submit">' + (isNew ? 'Cipta peranan' : 'Simpan') + '</button>') + '</form>';
+    };
+    $('view').innerHTML = roles.map(function (r) { return form(r, false); }).join('') + form(null, true);
+    Array.prototype.forEach.call(document.querySelectorAll('.role-form'), function (f) {
+      f.onsubmit = function (ev) {
+        ev.preventDefault();
+        var permsSel = Array.prototype.filter.call(f.querySelectorAll('input[name=perm]'), function (c) { return c.checked; }).map(function (c) { return c.value; });
+        if (f.dataset.orig && !f.active.checked && !confirm('Nyahaktif peranan ' + f.dataset.orig + '? Pengguna dengan peranan ini tidak boleh log masuk.')) return;
+        adminCall('saveRole', { originalName: f.dataset.orig, name: f.name.value, permissions: permsSel, active: f.active.checked }).then(function (r) {
+          S.data.roles = r.roles; SolarDB.set('data', S.data); render(); toast('Peranan disimpan'); refresh(true);
+        });
+      };
+    });
+  }
+
+  function counted(name, value, extra) {
+    return '<span class="counted"><input name="' + name + '" value="' + esc(value) + '" maxlength="' + L.LABEL_MAX + '" data-count="1"' + (extra || '') + '>' +
+      '<span class="cnt">' + String(value).length + '/' + L.LABEL_MAX + '</span></span>';
+  }
   function renderNames() {
-    setChrome('Aktiviti & jenis gambar', '#/admin', 'admin');
+    setChrome('Tetapan & label', '#/admin', 'admin');
     var acts = L.activities(S.data.activities);
     var types = L.photoTypes(S.data.types);
-    $('view').innerHTML = '<p class="muted small card">Hanya nama dan spesifikasi boleh diubah. Bilangan minimum, ukuran dan susun atur laporan adalah tetap. ' +
-      'Menukar nama tidak menjejaskan gambar sedia ada (gambar dipaut kepada ID).</p>' +
+    var labelsDesc = { BAKI: 'Kad dashboard', NIGHT: 'Status & kad', NOT_STARTED: 'Status', IN_PROGRESS: 'Status', DONE: 'Status', PENDING: 'Status & kategori', INSTALLED: 'Kategori' };
+    $('view').innerHTML = '<p class="muted small card">Label disimpan mengikut kunci — menukar label tidak mengubah data atau penapis. Maksimum ' + L.LABEL_MAX + ' aksara.</p>' +
+      '<form id="labelsForm" class="card form"><h3>Label status & kad</h3>' + Object.keys(L.LABEL_DEFAULTS).map(function (k) {
+        return '<label>' + esc(labelsDesc[k]) + ' <span class="muted small">(asal: ' + esc(L.LABEL_DEFAULTS[k]) + ')</span>' + counted('lab_' + k, lab(k), ' required') + '</label>';
+      }).join('') + '<button class="btn" type="submit">Simpan label</button></form>' +
       '<form id="namesForm">' + acts.map(function (a) {
         return '<section class="card form"><div class="muted small">Aktiviti ' + a.ActivityID + '</div>' +
-          '<label>Nama aktiviti<input name="act_' + a.ActivityID + '" value="' + esc(a.Name) + '" required></label>' +
+          '<label>Nama aktiviti' + counted('act_' + a.ActivityID, a.Name, ' required') + '</label>' +
           '<label>Spesifikasi (dipaparkan kepada pasukan)<input name="spec_' + a.ActivityID + '" value="' + esc(a.Spec) + '"></label>' +
           L.typesOfActivity(types, a.ActivityID).map(function (t) {
             return '<label>' + t.TypeID + ' <span class="muted small">(min ' + t.MinPhotos + (t.NeedsMeasurement ? ', perlu ukuran' : '') +
-              (t.ReportCount > 1 ? ', ' + t.ReportCount + ' dalam laporan' : '') + ')</span><input name="type_' + t.TypeID + '" value="' + esc(t.Name) + '" required></label>';
+              (t.ReportCount > 1 ? ', ' + t.ReportCount + ' dalam laporan' : '') + ')</span>' + counted('type_' + t.TypeID, t.Name, ' required') + '</label>';
           }).join('') + '</section>';
-      }).join('') + '<button class="btn block" type="submit">Simpan</button></form>';
+      }).join('') + '<button class="btn block" type="submit">Simpan nama aktiviti & jenis gambar</button></form>';
+    Array.prototype.forEach.call(document.querySelectorAll('input[data-count]'), function (i) {
+      i.oninput = function () {
+        var c = i.parentNode.querySelector('.cnt');
+        c.textContent = i.value.length + '/' + L.LABEL_MAX;
+        c.classList.toggle('full', i.value.length >= L.LABEL_MAX);
+      };
+    });
+    $('labelsForm').onsubmit = function (ev) {
+      ev.preventDefault();
+      var f = ev.target, labels = {};
+      Object.keys(L.LABEL_DEFAULTS).forEach(function (k) { labels[k] = f['lab_' + k].value; });
+      adminCall('saveLabels', { labels: labels }).then(function (r) { S.data.labels = r.labels; SolarDB.set('data', S.data); render(); toast('Label disimpan'); });
+    };
     $('namesForm').onsubmit = function (ev) {
       ev.preventDefault();
       var f = ev.target;
@@ -1168,13 +1600,13 @@
     if (!el) return;
     var act = el.dataset.act;
     var d = el.dataset;
-    if (act === 'rsel' || act === 'psel') return; // checkboxes, handled by change
+    if (act === 'rsel' || act === 'psel' || act === 'msel' || act === 'rshowReported') return; // checkboxes, handled by change
     if (el.tagName === 'A') return;
     ev.preventDefault();
     switch (act) {
       case 'closeSheet': closeSheet(); break;
       case 'filter': S.filters[d.group] = d.val; render(); break;
-      case 'rfilter': S.reportFilter[d.group] = d.val; render(); break;
+      case 'rbound': S.rf.bound = d.val; render(); break;
       case 'addPhoto': ev.stopPropagation(); askPhotoSource(d.pole, d.type); break;
       case 'pick': pick(d.mode, d.pole, d.type); break;
       case 'measOk': confirmMeasurement(); break;
@@ -1205,22 +1637,70 @@
         break;
       case 'ract': S.rAct = d.val; render(); break;
       case 'rselReady': {
-        var mm = merged();
-        var act = S.rAct || 'A';
-        var max = reportMax(act);
-        var n = 0;
+        var act = S.rAct || 'A', max = reportMax(act), n = 0;
         S.reportSel = {};
-        mm.poles.slice().sort(function (a, b) { return a.PoleID < b.PoleID ? -1 : 1; }).forEach(function (p) {
-          var rf = S.reportFilter;
-          if (rf.bound !== 'all' && p.Bound !== rf.bound) return;
-          if (rf.cat !== 'all' && p.Category !== rf.cat) return;
-          if (n < max && !L.reportMissing(act, p.PoleID, mm.types, mm.statusPhotos).length) { S.reportSel[p.PoleID] = true; n++; }
-        });
+        reportRows(act).forEach(function (r) { if (r.st.ready && n < max) { S.reportSel[r.pole.PoleID] = true; n++; } });
         render();
         break;
       }
       case 'rselNone': S.reportSel = {}; render(); break;
-      case 'genContinue': doGenerate(S.pendingReport.act, S.pendingReport.ids); break;
+      case 'rchoose': chooseForReport(d.id); break;
+      case 'reportFromSchedule': {
+        var picked = Object.keys(S.planSel).filter(function (k) { return S.planSel[k]; });
+        var ra = S.rAct || 'A';
+        S.reportSel = {};
+        S.rf = { bound: 'all', q: '', from: '', to: '', showReported: true };
+        var rr = reportRows(ra);
+        picked.forEach(function (id) { if (rr.some(function (r) { return r.pole.PoleID === id && r.st.ready; })) S.reportSel[id] = true; });
+        S.planSel = {};
+        toast(Object.keys(S.reportSel).length + ' daripada ' + picked.length + ' tiang sedia untuk ' + actName(ra));
+        go('#/laporan');
+        break;
+      }
+      case 'photoDelete': deletePhotoDialog(d.id); break;
+      case 'photoDeleteYes':
+        adminCall('deletePhoto', { photoId: d.id }).then(function (r) {
+          S.data.photos = S.data.photos.filter(function (x) { return x.PhotoID !== r.deleted; });
+          apiDone(r, 'Gambar dipadam (dalam Trash Drive)');
+        });
+        break;
+      case 'measEdit': measEditDialog(d.id); break;
+      case 'measEditSave': measEditSave(d.id); break;
+      case 'moveOne': {
+        var ph = S.data.photos.filter(function (x) { return x.PhotoID === d.id; })[0];
+        if (ph) moveDialog(ph.PoleID, [d.id]);
+        break;
+      }
+      case 'moveOpen': moveDialog(d.id, []); break;
+      case 'moveSave': moveSave(); break;
+      case 'swapOpen': swapDialog(d.id); break;
+      case 'swapSave': swapSave(d.id); break;
+      case 'overrideOpen': overrideDialog(d.id); break;
+      case 'overrideSave':
+        adminCall('overrideStatus', { poleId: d.id, status: $('ovStatus').value, actualDate: $('ovDate').value }).then(function (r) { apiDone(r, 'Status disimpan'); });
+        break;
+      case 'rinEdit': rinDialog(d.pole, d.actId); break;
+      case 'rinSave':
+        adminCall('setRin', { poleId: d.pole, activityId: d.actId, rin: $('rinIn').value }).then(function (r) { apiDone(r, 'No. RIN disimpan'); });
+        break;
+      case 'poleActive':
+        if (d.val === '1' || confirm('Nyahaktif ' + d.id + '? Tiang disembunyikan dari senarai dan jumlah; data disimpan.')) {
+          adminCall('setPoleActive', { poleId: d.id, active: d.val === '1' }).then(function (r) { apiDone(r, d.val === '1' ? 'Tiang diaktifkan semula' : 'Tiang dinyahaktif'); });
+        }
+        break;
+      case 'poleDelete': poleDeleteDialog(d.id); break;
+      case 'poleDeleteYes':
+        adminCall('deletePole', { poleId: d.id, confirmId: $('delConfirm').value }).then(function () {
+          S.data.poles = S.data.poles.filter(function (x) { return x.PoleID !== d.id; });
+          SolarDB.set('data', S.data); closeSheet(); toast('Tiang ' + d.id + ' dipadam'); go('#/jadual'); refresh(true);
+        });
+        break;
+      case 'exportData': exportData(); break;
+      case 'importTemplate':
+        downloadB64(btoa('Pole ID,CH,Bound,Category\r\nSSL124,CH.41450,EB,Perlu pasang\r\n'), 'templat_import_tiang.csv', 'text/csv');
+        break;
+      case 'importSave': importSave(); break;
+      case 'importReset': S.imp = null; render(); break;
       case 'viewPhoto': ev.stopPropagation(); viewPhoto(d.id); break;
       case 'addNote': addNote(d.id); break;
       case 'done': setDone(d.id, d.val === '1'); break;
@@ -1253,19 +1733,23 @@
     if (el.dataset && el.dataset.act === 'psel') {
       S.planSel[el.value] = el.checked;
       var bar = document.querySelector('.planbar');
-      var cnt = Object.keys(S.planSel).filter(function (k) { return S.planSel[k]; }).length;
+      var cnt = selCount();
       if (bar) {
         bar.classList.toggle('show', cnt > 0);
         bar.querySelector('span').textContent = cnt + ' tiang dipilih';
-        bar.querySelector('[data-act=planOpen]').disabled = !cnt;
+        Array.prototype.forEach.call(bar.querySelectorAll('[data-act=planOpen],[data-act=reportFromSchedule]'), function (b) { b.disabled = !cnt; });
       }
     }
+    if (el.dataset && el.dataset.act === 'msel') S.moveSel[el.value] = el.checked;
+    if (el.dataset && el.dataset.act === 'rshowReported') { S.rf.showReported = el.checked; render(); }
+    if (el.id === 'rinGen') S.rinDraft = el.value;
     if (el.dataset && el.dataset.act === 'rsel') {
       S.reportSel[el.value] = el.checked;
       var n = Object.keys(S.reportSel).filter(function (k) { return S.reportSel[k]; }).length;
       var max = reportMax(S.rAct || 'A');
       if (n > max) { el.checked = false; S.reportSel[el.value] = false; n--; toast('Maksimum ' + max + ' tiang.'); }
       var c = $('nSel'); if (c) c.textContent = n;
+      var g = document.querySelector('[data-act=genReport]'); if (g) g.disabled = !n;
     }
   });
 
@@ -1286,6 +1770,7 @@
   window.addEventListener('hashchange', function () { if ((location.hash || '').indexOf('#login') === 0) return; render(); });
   window.addEventListener('online', function () { showBanner(); refresh(true); });
   window.addEventListener('offline', showBanner);
+  window.addEventListener('unhandledrejection', function (e) { if (e.reason && e.reason.shown) e.preventDefault(); });
   document.addEventListener('visibilitychange', function () {
     if (document.visibilityState === 'visible' && online()) { SolarSync.kick(); refresh(true); }
   });

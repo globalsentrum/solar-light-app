@@ -5,8 +5,8 @@
   "scripts": {
     "build": "node scripts/build.js",
     "import": "node scripts/import-xlsx.js data/Solar_Street_Lighting_Installation_Planning_1.xlsx && node scripts/build.js",
-    "test": "node scripts/build.js && node --test tests/logic.test.js tests/backend.test.js",
-    "test:e2e": "node scripts/build.js && node --test --test-concurrency=1 --test-timeout=180000 tests/e2e.test.js",
+    "test": "node scripts/build.js && node --test tests/logic.test.js tests/backend.test.js tests/v3.backend.test.js",
+    "test:e2e": "node scripts/build.js && node --test --test-concurrency=1 --test-timeout=200000 tests/e2e.test.js tests/v3.e2e.test.js",
     "test:all": "npm test && npm run test:e2e",
     "serve": "node tests/e2e-server.js 8080",
     "preview": "node scripts/preview-report.js"

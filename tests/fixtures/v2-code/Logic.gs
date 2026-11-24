@@ -1,0 +1,397 @@
+/*
+ * Solar Street Light — shared business logic (v2: activities + photo types).
+ *
+ * SOURCE OF TRUTH. This one file is used by:
+ *   - the frontend (copied to docs/js/logic.js)
+ *   - the Apps Script backend (copied to apps-script/Logic.gs)
+ *   - the Node tests and the report preview script
+ * Run `npm run build` after editing so the copies stay identical (a test fails if they differ).
+ *
+ * Plain ES5-style JavaScript so it runs in Apps Script V8, older iPhone Safari and Node.
+ */
+var SolarLogic = (function () {
+  'use strict';
+
+  var CATEGORY = { INSTALLED: 'Sudah dipasang', TODO: 'Perlu pasang', PENDING: 'Tunggu kelulusan' };
+  var CATEGORIES = [CATEGORY.TODO, CATEGORY.PENDING, CATEGORY.INSTALLED];
+  var WORK = { NOT_STARTED: 'Belum mula', IN_PROGRESS: 'Dalam proses', DONE: 'Siap', PENDING: 'Tunggu kelulusan' };
+  var ROLES = ['Admin', 'Team', 'Boss'];
+  var WORK_AREA_TO_CATEGORY = { 'installed': CATEGORY.INSTALLED, 'non-widening': CATEGORY.TODO, 'widening': CATEGORY.PENDING };
+
+  /*
+   * Activities and photo types. IDs, order, minimums, measurement and report counts are FIXED
+   * (the PDF layouts depend on them). Only Name (and the activity Spec) can be changed by admin;
+   * those come from the Activities / PhotoTypes sheets and override the defaults here.
+   */
+  var ACTIVITIES = [
+    { ActivityID: 'A', Order: 1, Name: 'Pegging', Spec: '', ReportKey: 'PEGGING' },
+    { ActivityID: 'B', Order: 2, Name: 'Trial Pit', Spec: 'Dalam 1.5m, lebar 1m, panjang 1m', ReportKey: 'TRIALPIT' },
+    { ActivityID: 'C', Order: 3, Name: 'Installation', Spec: '', ReportKey: 'INSTALLATION' }
+  ];
+  var PHOTO_TYPES = [
+    { TypeID: 'A1', ActivityID: 'A', Order: 1, Name: 'Pegging', MinPhotos: 1, ReportCount: 1, NeedsMeasurement: false, MeasureLabel: '' },
+    { TypeID: 'B1', ActivityID: 'B', Order: 2, Name: 'Korek', MinPhotos: 1, ReportCount: 1, NeedsMeasurement: false, MeasureLabel: '' },
+    { TypeID: 'B2', ActivityID: 'B', Order: 3, Name: 'Lebar', MinPhotos: 1, ReportCount: 1, NeedsMeasurement: true, MeasureLabel: 'WIDTH' },
+    { TypeID: 'B3', ActivityID: 'B', Order: 4, Name: 'Panjang', MinPhotos: 1, ReportCount: 1, NeedsMeasurement: true, MeasureLabel: 'LENGTH' },
+    { TypeID: 'B4', ActivityID: 'B', Order: 5, Name: 'Dalam', MinPhotos: 1, ReportCount: 1, NeedsMeasurement: true, MeasureLabel: 'DEPTH' },
+    { TypeID: 'C1', ActivityID: 'C', Order: 6, Name: 'Progress pemasangan', MinPhotos: 4, ReportCount: 4, NeedsMeasurement: false, MeasureLabel: '' },
+    { TypeID: 'C2', ActivityID: 'C', Order: 7, Name: 'Siap dipasang (siang)', MinPhotos: 1, ReportCount: 1, NeedsMeasurement: false, MeasureLabel: '' },
+    { TypeID: 'C3', ActivityID: 'C', Order: 8, Name: 'Ujian lampu (malam)', MinPhotos: 1, ReportCount: 1, NeedsMeasurement: false, MeasureLabel: '' }
+  ];
+  /** Old v1 slot -> new photo type (used once by migrateV2). S3 "Ukuran" -> B2 without a measurement. */
+  var LEGACY_SLOT_MAP = { S1: 'A1', S2: 'B1', S3: 'B2', S4: 'C1', S5: 'C1', S6: 'C2', S7: 'C3' };
+
+  // ---------- small helpers ----------
+  function bool(v) {
+    if (v === true) return true;
+    if (v === false || v === null || v === undefined) return false;
+    var s = String(v).trim().toUpperCase();
+    return s === 'TRUE' || s === 'YES' || s === '1';
+  }
+  function copy(o) { var r = {}; for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) r[k] = o[k]; return r; }
+
+  // ---------- pole IDs ----------
+  function isPoleId(id) { return /^SSL\d{3}$/.test(String(id == null ? '' : id)); }
+  /** "SL-034" -> "SSL034"; already new -> unchanged; anything else -> null */
+  function poleIdFromLegacy(id) {
+    var s = String(id == null ? '' : id).trim();
+    if (isPoleId(s)) return s;
+    var m = s.match(/^SL-(\d{3})$/);
+    return m ? 'SSL' + m[1] : null;
+  }
+  /** Search: "SSL034", "ssl34", "34", "034", "SL-034" all find SSL034. */
+  function poleMatchesQuery(id, q) {
+    var query = String(q == null ? '' : q).toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (!query) return true;
+    var idU = String(id).toUpperCase();
+    if (/^\d+$/.test(query)) {
+      var num = String(parseInt(idU.replace(/\D/g, ''), 10));
+      var qn = String(parseInt(query, 10));
+      return num === qn || idU.indexOf(query) >= 0;
+    }
+    if (idU.indexOf(query) >= 0) return true;                  // "SSL05" -> SSL050..SSL059
+    var legacy = query.match(/^S?SL(\d{1,3})$/);               // "SL034", "SSL34", "SSL5" -> padded
+    return !!legacy && idU === 'SSL' + ('000' + legacy[1]).slice(-3);
+  }
+
+  function isChainageExact(text) { return /^CH\.\d{5}$/.test(String(text == null ? '' : text).trim()); }
+
+  function categoryFromWorkArea(workArea) {
+    var key = String(workArea == null ? '' : workArea).trim().toLowerCase();
+    if (!WORK_AREA_TO_CATEGORY.hasOwnProperty(key)) throw new Error('Unknown Work Area: "' + workArea + '"');
+    return WORK_AREA_TO_CATEGORY[key];
+  }
+
+  function chainageSortKey(text) {
+    var m = String(text == null ? '' : text).match(/(\d+(?:\.\d+)?)/);
+    return m ? parseFloat(m[1]) : Number.MAX_VALUE;
+  }
+
+  // ---------- activities / types with admin names ----------
+  /** Merge names from the sheets over the fixed definitions. */
+  function activities(sheetRows) {
+    var byId = {};
+    (sheetRows || []).forEach(function (r) { byId[String(r.ActivityID)] = r; });
+    return ACTIVITIES.map(function (a) {
+      var o = copy(a), r = byId[a.ActivityID];
+      if (r) {
+        if (String(r.Name || '').trim()) o.Name = String(r.Name).trim();
+        if (r.Spec !== undefined && r.Spec !== null) o.Spec = String(r.Spec);
+      }
+      return o;
+    });
+  }
+  function photoTypes(sheetRows) {
+    var byId = {};
+    (sheetRows || []).forEach(function (r) { byId[String(r.TypeID)] = r; });
+    return PHOTO_TYPES.map(function (t) {
+      var o = copy(t), r = byId[t.TypeID];
+      if (r && String(r.Name || '').trim()) o.Name = String(r.Name).trim();
+      return o;
+    });
+  }
+  function typeById(id) {
+    for (var i = 0; i < PHOTO_TYPES.length; i++) if (PHOTO_TYPES[i].TypeID === id) return PHOTO_TYPES[i];
+    return null;
+  }
+  function typesOfActivity(types, activityId) {
+    return types.filter(function (t) { return t.ActivityID === activityId; });
+  }
+
+  // ---------- measurement ----------
+  /** Parse what the team typed. Accepts "1.3" and "1,3". Max 2 decimals, > 0. */
+  function parseMeasurement(input) {
+    var s = String(input == null ? '' : input).trim().replace(/\s/g, '').replace(/m$/i, '');
+    if (!s) return { ok: false, error: 'Sila masukkan ukuran dalam meter (cth. 1.3).' };
+    if (!/^\d+([.,]\d{1,2})?$/.test(s)) {
+      return { ok: false, error: 'Ukuran tidak sah. Masukkan nombor dalam meter, maksimum 2 titik perpuluhan (cth. 1.35).' };
+    }
+    var v = parseFloat(s.replace(',', '.'));
+    if (!(v > 0)) return { ok: false, error: 'Ukuran mesti lebih daripada 0.' };
+    return { ok: true, value: v };
+  }
+  function hasMeasurement(p) { return parseMeasurement(p.MeasurementM).ok; }
+  /** 1.3 -> "1.3", 2 -> "2", 1.25 -> "1.25" */
+  function formatMeasurement(v) { var n = Number(v); return isFinite(n) ? String(Math.round(n * 100) / 100) : ''; }
+
+  // ---------- photos ----------
+  function photoTime(p) { return String(p.CapturedAt || '') + '|' + String(p.UploadedAt || '') + '|' + String(p.PhotoID || ''); }
+  function byTime(a, b) { return photoTime(a) < photoTime(b) ? -1 : photoTime(a) > photoTime(b) ? 1 : 0; }
+
+  function visiblePhotosOf(poleId, photos) {
+    return (photos || []).filter(function (p) { return p.PoleID === poleId && !bool(p.Hidden); });
+  }
+  /** A photo that counts toward completeness: visible, not "Ambil semula", has a measurement if the type needs one. */
+  function isGood(p, type) {
+    return !bool(p.Hidden) && !bool(p.RetakeFlag) && (!type.NeedsMeasurement || hasMeasurement(p));
+  }
+
+  function typeState(poleId, type, photos) {
+    var list = visiblePhotosOf(poleId, photos).filter(function (p) { return p.PhotoTypeID === type.TypeID; }).sort(byTime);
+    var good = list.filter(function (p) { return isGood(p, type); });
+    var noMeasure = type.NeedsMeasurement ? list.filter(function (p) { return !bool(p.RetakeFlag) && !hasMeasurement(p); }).length : 0;
+    var flagged = list.some(function (p) { return bool(p.RetakeFlag); });
+    // ok = minimum met; empty = no photo; retake = not met and a photo is flagged "Ambil semula"; partial = otherwise
+    var state = good.length >= type.MinPhotos ? 'ok' : !list.length ? 'empty' : flagged ? 'retake' : 'partial';
+    return { photos: list, goodCount: good.length, min: type.MinPhotos, complete: good.length >= type.MinPhotos, state: state, noMeasurement: noMeasure };
+  }
+
+  function needsPhotos(pole) { return pole.Category === CATEGORY.TODO; }
+
+  /**
+   * Photo status. Units: each type counts min(good, MinPhotos) -> Pegging /1, Trial Pit /4, Installation /6 (C1 = 4).
+   */
+  function photoStatus(pole, types, photos, acts) {
+    types = types || photoTypes();
+    acts = acts || activities();
+    var perAct = acts.map(function (a) {
+      var done = 0, total = 0;
+      typesOfActivity(types, a.ActivityID).forEach(function (t) {
+        var st = typeState(pole.PoleID, t, photos);
+        done += Math.min(st.goodCount, t.MinPhotos);
+        total += t.MinPhotos;
+      });
+      return { ActivityID: a.ActivityID, name: a.Name, done: done, total: total, complete: done === total };
+    });
+    var done = 0, total = 0;
+    perAct.forEach(function (x) { done += x.done; total += x.total; });
+    if (!needsPhotos(pole)) {
+      return { required: false, done: done, total: total, complete: false, activities: perAct,
+        label: pole.Category === CATEGORY.INSTALLED ? 'Tidak berkaitan' : '—', detail: '', missing: [], retake: [] };
+    }
+    var missing = [], retake = [];
+    types.forEach(function (t) {
+      var st = typeState(pole.PoleID, t, photos);
+      if (!st.complete) {
+        missing.push(t.Name + (t.MinPhotos > 1 ? ' (' + st.goodCount + '/' + t.MinPhotos + ')' : '') +
+          (st.noMeasurement ? ' — tiada ukuran' : ''));
+      }
+      if (st.photos.some(function (p) { return bool(p.RetakeFlag); }) && !st.complete) retake.push(t.Name);
+    });
+    var complete = done === total;
+    var detail = perAct.map(function (x) { return x.complete ? x.name + ' ✓' : x.name + ' ' + x.done + '/' + x.total; }).join(' · ');
+    return { required: true, done: done, total: total, complete: complete, activities: perAct,
+      label: complete ? 'Gambar lengkap' : 'Belum lengkap', detail: detail, missing: missing, retake: retake };
+  }
+
+  function workStatus(pole, photos) {
+    if (pole.Category === CATEGORY.INSTALLED) return WORK.DONE;
+    if (pole.Category === CATEGORY.PENDING) return WORK.PENDING;
+    if (bool(pole.IsDone)) return WORK.DONE;
+    return visiblePhotosOf(pole.PoleID, photos).length ? WORK.IN_PROGRESS : WORK.NOT_STARTED;
+  }
+
+  function hasRetakeFlag(poleId, photos) {
+    return visiblePhotosOf(poleId, photos).some(function (p) { return bool(p.RetakeFlag); });
+  }
+
+  // ---------- report selection ----------
+  /**
+   * Photos used in the report for one pole + type, in report order.
+   *  - Admin choice (ReportOrder 1..n) is used when exactly ReportCount chosen photos are still visible.
+   *  - Otherwise the latest ReportCount good photos, shown oldest -> newest.
+   */
+  function reportPhotos(poleId, typeId, photos) {
+    var t = typeById(typeId);
+    if (!t) return [];
+    var list = visiblePhotosOf(poleId, photos).filter(function (p) { return p.PhotoTypeID === typeId; });
+    var chosen = list.filter(function (p) { return Number(p.ReportOrder) > 0; })
+      .sort(function (a, b) { return Number(a.ReportOrder) - Number(b.ReportOrder); });
+    if (chosen.length === t.ReportCount) return chosen;
+    var good = list.filter(function (p) { return isGood(p, t); }).sort(byTime);
+    return good.slice(Math.max(0, good.length - t.ReportCount));
+  }
+  function isAdminChoice(poleId, typeId, photos) {
+    var t = typeById(typeId);
+    var chosen = visiblePhotosOf(poleId, photos).filter(function (p) { return p.PhotoTypeID === typeId && Number(p.ReportOrder) > 0; });
+    return !!t && chosen.length === t.ReportCount;
+  }
+
+  /** What is missing for this pole in the report of one activity ([] = ready). */
+  function reportMissing(activityId, poleId, types, photos) {
+    var out = [];
+    typesOfActivity(types, activityId).forEach(function (t) {
+      var ps = reportPhotos(poleId, t.TypeID, photos);
+      if (ps.length < t.ReportCount) out.push(t.Name + ' (' + ps.length + '/' + t.ReportCount + ' gambar)');
+      else if (t.NeedsMeasurement && ps.some(function (p) { return !hasMeasurement(p); })) out.push(t.Name + ' (tiada ukuran)');
+    });
+    return out;
+  }
+
+  function reportPhotoCount(activityId) {
+    var n = 0;
+    PHOTO_TYPES.forEach(function (t) { if (t.ActivityID === activityId) n += t.ReportCount; });
+    return n;
+  }
+
+  /**
+   * Layout of the photo pages for one activity (renderer-independent, used by Apps Script and the preview).
+   * Sizes in points; A4 portrait, 36 pt margins -> 523 pt usable width.
+   */
+  function buildReportSpec(activityId, poleIds, types, photos) {
+    var ids = poleIds.slice().sort();
+    var pick = function (poleId, typeId) { return reportPhotos(poleId, typeId, photos); };
+    var blocks = [];
+    if (activityId === 'A') {
+      var cells = ids.map(function (id) {
+        var p = pick(id, 'A1')[0];
+        return { photoId: p ? p.PhotoID : null, caption: id };
+      });
+      blocks.push({ title: 'PEGGING', columns: 3, box: { w: 160, h: 120 }, cells: cells, rowCaptions: null,
+        footer: 'Total pegging : ' + ids.length + ' nos', pageBreakBefore: false });
+    } else if (activityId === 'B') {
+      ids.forEach(function (id, i) {
+        var cell = function (typeId, label) {
+          var p = pick(id, typeId)[0];
+          return { photoId: p ? p.PhotoID : null,
+            caption: label ? label + ' : ' + (p ? formatMeasurement(p.MeasurementM) : '?') + 'M' : id };
+        };
+        blocks.push({ title: 'TRIAL PIT EXCAVATION WORKS', columns: 4, box: { w: 118, h: 157 },
+          cells: [cell('B1', ''), cell('B2', 'WIDTH'), cell('B3', 'LENGTH'), cell('B4', 'DEPTH')],
+          rowCaptions: null, footer: '', pageBreakBefore: i > 0 && i % 3 === 0 });
+      });
+    } else if (activityId === 'C') {
+      ids.forEach(function (id, i) {
+        var prog = pick(id, 'C1');
+        var cells1 = [];
+        for (var k = 0; k < 4; k++) cells1.push({ photoId: prog[k] ? prog[k].PhotoID : null, caption: '' });
+        blocks.push({ title: 'INSTALLATION SOLAR STREET LIGHTING PROGRESS', columns: 4, box: { w: 118, h: 157 },
+          cells: cells1, rowCaption: id, footer: '', pageBreakBefore: i > 0 });
+        var day = pick(id, 'C2')[0], night = pick(id, 'C3')[0];
+        blocks.push({ title: 'INSTALLATION SOLAR STREET LIGHTING COMPLETED', columns: 2, box: { w: 245, h: 200 },
+          cells: [{ photoId: day ? day.PhotoID : null, caption: '' }, { photoId: night ? night.PhotoID : null, caption: '' }],
+          rowCaption: id, footer: '', pageBreakBefore: false });
+      });
+    } else {
+      throw new Error('Unknown activity ' + activityId);
+    }
+    return { page: { w: 595.28, h: 841.89, margin: 36 }, blocks: blocks };
+  }
+
+  /** Fit an image inside a box keeping its aspect ratio. */
+  function fitBox(w, h, box) {
+    var s = Math.min(box.w / w, box.h / h);
+    return { w: Math.max(1, Math.round(w * s)), h: Math.max(1, Math.round(h * s)) };
+  }
+
+  // ---------- dates (Malaysia, UTC+8, no daylight saving) ----------
+  /** YYYY-MM-DD in Malaysia for a timestamp (ms) plus addDays. */
+  function klDate(ms, addDays) {
+    var d = new Date(ms + 8 * 3600000 + (addDays || 0) * 86400000);
+    return d.toISOString().slice(0, 10);
+  }
+  function isIsoDate(s) {
+    var m = String(s || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return false;
+    var d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+    return d.getUTCFullYear() === +m[1] && d.getUTCMonth() === +m[2] - 1 && d.getUTCDate() === +m[3];
+  }
+  /** PoleID -> [plan entries] for one date. */
+  function plansForDate(plans, date) {
+    var out = {};
+    (plans || []).forEach(function (p) {
+      if (p.Date === date) (out[p.PoleID] = out[p.PoleID] || []).push(p);
+    });
+    return out;
+  }
+
+  function sortPolesByChainage(poles) {
+    return poles.slice().sort(function (a, b) {
+      var d = chainageSortKey(a.Chainage) - chainageSortKey(b.Chainage);
+      if (d !== 0) return d;
+      return a.PoleID < b.PoleID ? -1 : a.PoleID > b.PoleID ? 1 : 0;
+    });
+  }
+
+  function dashboard(poles, types, photos, acts) {
+    var r = { total: poles.length, done: 0, photoComplete: 0, photoRequired: 0, todo: 0, pending: 0, installed: 0,
+      inProgress: 0, notStarted: 0, bound: { EB: { total: 0, done: 0 }, WB: { total: 0, done: 0 } },
+      incomplete: [], retake: [], chInexact: [] };
+    poles.forEach(function (p) {
+      var ws = workStatus(p, photos);
+      var ps = photoStatus(p, types, photos, acts);
+      if (ws === WORK.DONE) r.done++;
+      if (ws === WORK.IN_PROGRESS) r.inProgress++;
+      if (ws === WORK.NOT_STARTED) r.notStarted++;
+      if (p.Category === CATEGORY.TODO) r.todo++;
+      if (p.Category === CATEGORY.PENDING) r.pending++;
+      if (p.Category === CATEGORY.INSTALLED) r.installed++;
+      if (ps.required) {
+        r.photoRequired++;
+        if (ps.complete) r.photoComplete++;
+        else r.incomplete.push({ PoleID: p.PoleID, missing: ps.missing, detail: ps.detail, done: ps.done, total: ps.total });
+      }
+      if (hasRetakeFlag(p.PoleID, photos)) r.retake.push(p.PoleID);
+      if (!bool(p.ChainageExact)) r.chInexact.push(p.PoleID);
+      var b = r.bound[p.Bound] || (r.bound[p.Bound] = { total: 0, done: 0 });
+      b.total++;
+      if (ws === WORK.DONE) b.done++;
+    });
+    return r;
+  }
+
+  // ---------- permissions (backend calls this for EVERY action) ----------
+  var PERMS = {
+    view: ['Admin', 'Team', 'Boss'],
+    viewPhotos: ['Admin', 'Team', 'Boss'],
+    downloadReport: ['Admin', 'Team', 'Boss'],
+    uploadPhoto: ['Admin', 'Team'],
+    addNote: ['Admin', 'Team'],
+    setDone: ['Admin', 'Team'],
+    editPole: ['Admin'],
+    setCategory: ['Admin'],
+    flagRetake: ['Admin'],
+    hidePhoto: ['Admin'],
+    selectReport: ['Admin'],
+    generateReport: ['Admin'],
+    planWork: ['Admin'],
+    manageUsers: ['Admin'],
+    manageTypes: ['Admin'],
+    viewAudit: ['Admin'],
+    viewHidden: ['Admin']
+  };
+  function can(role, action) { var a = PERMS[action]; return !!a && a.indexOf(role) !== -1; }
+  function denyReason(role, action, pole) {
+    if (!can(role, action)) return 'Anda tiada kebenaran untuk tindakan ini.';
+    if (!pole) return '';
+    if (action === 'uploadPhoto' && pole.Category === CATEGORY.PENDING) return 'Tiang ini masih Tunggu kelulusan — gambar belum boleh diambil.';
+    if (action === 'setDone' && pole.Category !== CATEGORY.TODO) return 'Status Siap hanya untuk tiang kategori Perlu pasang.';
+    return '';
+  }
+
+  return {
+    CATEGORY: CATEGORY, CATEGORIES: CATEGORIES, WORK: WORK, ROLES: ROLES, PERMS: PERMS,
+    ACTIVITIES: ACTIVITIES, PHOTO_TYPES: PHOTO_TYPES, LEGACY_SLOT_MAP: LEGACY_SLOT_MAP,
+    bool: bool, isPoleId: isPoleId, poleIdFromLegacy: poleIdFromLegacy, poleMatchesQuery: poleMatchesQuery,
+    isChainageExact: isChainageExact, categoryFromWorkArea: categoryFromWorkArea, chainageSortKey: chainageSortKey,
+    activities: activities, photoTypes: photoTypes, typeById: typeById, typesOfActivity: typesOfActivity,
+    parseMeasurement: parseMeasurement, hasMeasurement: hasMeasurement, formatMeasurement: formatMeasurement,
+    typeState: typeState, photoStatus: photoStatus, workStatus: workStatus, hasRetakeFlag: hasRetakeFlag,
+    reportPhotos: reportPhotos, isAdminChoice: isAdminChoice, reportMissing: reportMissing, reportPhotoCount: reportPhotoCount,
+    buildReportSpec: buildReportSpec, fitBox: fitBox,
+    klDate: klDate, isIsoDate: isIsoDate, plansForDate: plansForDate,
+    sortPolesByChainage: sortPolesByChainage, dashboard: dashboard, can: can, denyReason: denyReason
+  };
+})();
+
+if (typeof module !== 'undefined' && module.exports) { module.exports = SolarLogic; }

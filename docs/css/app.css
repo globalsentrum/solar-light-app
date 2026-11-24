@@ -214,3 +214,69 @@ label.check input { width: 22px; height: 22px; margin: 0; flex: 0 0 auto; }
 .warn-text { color: #a14d00; }
 .ok-text { color: var(--done); }
 .btn[disabled] { opacity: .45; cursor: default; }
+
+/* v3 */
+.stat.big .stat-val { font-size: 40px; }
+.stat-label { word-break: break-word; }
+.badge.b-night { background: #e9e6fb; color: #3b2f8f; }
+.prow.inactive { opacity: .6; }
+.prow-badges .badge { max-width: 150px; overflow: hidden; text-overflow: ellipsis; }
+.tile { margin-bottom: 10px; }
+.tile-title { min-width: 0; }
+.count-pill { display: inline-block; background: var(--none-bg); border-radius: 999px; padding: 1px 8px; font-size: 12px; font-weight: 700; white-space: nowrap; }
+/* ONE horizontal swipe row per photo type: the screen does not grow as photos are added */
+.strip { display: flex; flex-wrap: nowrap; gap: 6px; overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch;
+  scroll-snap-type: x proximity; padding: 4px 0 6px; max-width: 100%; }
+.strip .thumb-wrap { scroll-snap-align: start; width: 96px; }
+.act-head { flex-wrap: wrap; }
+.rin { margin-left: auto; border: 1px dashed var(--line); background: #fff; border-radius: 999px; padding: 4px 10px; font-size: 12px; color: var(--muted); cursor: pointer; }
+.rin.set { border-style: solid; color: var(--green); font-weight: 700; }
+.rin[disabled] { cursor: default; }
+.tools { margin-top: 8px; }
+.tools .btn { padding: 7px 10px; font-size: 13px; }
+.warn-box { background: var(--amber-bg); }
+input[type=search], .picker { width: 100%; font-size: 16px; padding: 10px; border: 1.5px solid var(--line); border-radius: 10px; margin: 4px 0; background: #fff; }
+.picker { padding: 4px; }
+.move-list { max-height: 40vh; overflow-y: auto; border: 1px solid var(--line); border-radius: 10px; padding: 4px 8px; }
+.move-list .check { padding: 6px 0; border-bottom: 1px solid var(--line); }
+.mini { width: 44px; height: 44px; border-radius: 6px; overflow: hidden; background: var(--none-bg); flex: 0 0 auto; display: flex; align-items: center; justify-content: center; }
+.mini img { width: 100%; height: 100%; object-fit: cover; }
+.perm-grid { display: grid; grid-template-columns: 1fr; gap: 0; margin: 6px 0; }
+@media (min-width: 560px) { .perm-grid { grid-template-columns: 1fr 1fr; } }
+.perm-grid .check { padding: 5px 0; font-size: 14px; }
+.role-head { margin-bottom: 6px; }
+.counted { display: flex; align-items: center; gap: 6px; }
+.counted input { flex: 1; min-width: 0; }
+.cnt { font-size: 12px; color: var(--muted); min-width: 40px; text-align: right; }
+.cnt.full { color: var(--amber); font-weight: 700; }
+.rlist { max-height: none; }
+.rrow { display: flex; gap: 10px; align-items: flex-start; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.rrow input { width: 22px; height: 22px; margin-top: 2px; flex: 0 0 auto; }
+.rrow input:disabled { opacity: .35; }
+.rrow-main { flex: 1; min-width: 0; }
+.rrow-main[data-act] { cursor: pointer; }
+.link { color: var(--green-2); font-weight: 700; }
+.daterange { display: flex; gap: 8px; }
+.daterange label { flex: 1; font-size: 13px; }
+.daterange input { width: 100%; font-size: 15px; padding: 8px; border: 1.5px solid var(--line); border-radius: 10px; }
+.imp-table { max-height: 45vh; overflow-y: auto; }
+.imp-error td { background: var(--red-bg); }
+.imp-exists td { background: var(--amber-bg); }
+.err-text { color: var(--red); }
+.planbar .btn { white-space: nowrap; }
+button.menu-item { width: 100%; border: 0; text-align: left; font: inherit; font-size: 26px; cursor: pointer; }
+/* fixed-height tile header: name line + one non-wrapping info line */
+.tile-name { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tile-sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 22px; height: 22px; }
+.tile-title { flex: 1; min-width: 0; }
+/* selection bar: count on its own line, buttons share the row and never overflow */
+.planbar { flex-wrap: wrap; row-gap: 6px; }
+.planbar span { flex: 1 0 100%; font-size: 14px; }
+.planbar .btn { flex: 1 1 0; min-width: 0; margin: 0; padding: 9px 6px; font-size: 14px; overflow: hidden; text-overflow: ellipsis; }
+.planbar .x-btn { flex: 0 0 44px; padding: 9px 0; }
+.planbar .btn { text-overflow: clip; white-space: nowrap; }
+/* long (20-character) status labels wrap instead of being cut */
+.prow-badges .badge { white-space: normal; max-width: 160px; text-align: center; line-height: 1.25; overflow: visible; text-overflow: clip; }
+.prow-badges { max-width: 48%; }
+.prow-badges .badge { max-width: 100%; }
+.prow-main b { white-space: nowrap; }

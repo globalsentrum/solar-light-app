@@ -6,6 +6,7 @@
  * New Google Sheet: run setup() once from the editor, then Deploy > New deployment > Web app
  *   Execute as: Me    Who has access: Anyone
  * Existing v1 Sheet (slots, SL-xxx IDs): run migrateV2() once (safe to run again).
+ * Existing v2 Sheet: run migrateV3() once (adds Roles + new Poles columns; nothing deleted; safe to run again).
  *
  * Every request: POST, body = JSON text (Content-Type text/plain to avoid CORS preflight):
  *   { "action": "...", "token": "<session token>", ...params }
@@ -22,7 +23,9 @@ var CHUNK_BYTES = 4 * 1024 * 1024;
 var MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 
 var SCHEMA = {
-  Poles: ['PoleID', 'Bound', 'Chainage', 'ChainageExact', 'Category', 'PlannedDate', 'IsDone', 'DoneBy', 'DoneAt', 'UpdatedAt'],
+  Poles: ['PoleID', 'Bound', 'Chainage', 'ChainageExact', 'Category', 'PlannedDate', 'IsDone', 'DoneBy', 'DoneAt', 'UpdatedAt',
+    'ActualDate', 'Active', 'PreviousIDs', 'StatusOverride', 'RINPegging', 'RINTrialPit', 'RINInstallation'],
+  Roles: ['RoleName', 'Permissions', 'BuiltIn', 'Active'],
   Photos: ['PhotoID', 'PoleID', 'PhotoTypeID', 'DriveFileID', 'FileURL', 'Source', 'CapturedAt', 'UploadedAt', 'Latitude', 'Longitude', 'AccuracyM', 'GPSAvailable', 'TakenBy', 'Hidden', 'RetakeFlag', 'ReportOrder', 'MeasurementM'],
   Activities: ['ActivityID', 'Name', 'Spec'],
   PhotoTypes: ['TypeID', 'ActivityID', 'Name'],
@@ -85,7 +88,7 @@ function sheet_(name) {
 
 function normValue_(v, header) {
   if (v instanceof Date) {
-    return header === 'PlannedDate' || header === 'Date' ? Utilities.formatDate(v, TZ, 'yyyy-MM-dd')
+    return header === 'PlannedDate' || header === 'Date' || header === 'ActualDate' ? Utilities.formatDate(v, TZ, 'yyyy-MM-dd')
       : Utilities.formatDate(v, TZ, "yyyy-MM-dd'T'HH:mm:ssXXX");
   }
   if (typeof v === 'string') return v.trim();
@@ -227,9 +230,25 @@ function userFromToken_(token) {
   if (!u || !SolarLogic.bool(u.Active)) {
     throw apiError_('AUTH', 'Akaun anda tiada dalam senarai pengguna atau tidak aktif. Hubungi admin.');
   }
-  var role = str_(u.Role);
-  if (SolarLogic.ROLES.indexOf(role) < 0) throw apiError_('FORBIDDEN', 'Peranan akaun anda tidak sah. Hubungi admin.');
-  return { email: p.e, name: str_(u.Name) || p.e, role: role };
+  var role = roleOf_(str_(u.Role));
+  if (!role) throw apiError_('AUTH', 'Peranan akaun anda tidak aktif atau tidak wujud. Hubungi admin.');
+  return { email: p.e, name: str_(u.Name) || p.e, role: role.name, perms: role.perms, isAdmin: role.builtIn };
+}
+
+/** Role name -> {name, perms, builtIn}; null if unknown or inactive. Built-in Admin always has every permission. */
+function roleOf_(name, rolesTable) {
+  if (SolarLogic.sameId(name, SolarLogic.ADMIN_ROLE)) {
+    return { name: SolarLogic.ADMIN_ROLE, perms: SolarLogic.ALL_PERMISSIONS.slice(), builtIn: true };
+  }
+  var t = rolesTable || readTable_('Roles');
+  for (var i = 0; i < t.rows.length; i++) {
+    var r = t.rows[i];
+    if (SolarLogic.sameId(r.RoleName, name)) {
+      if (!SolarLogic.bool(r.Active)) return null;
+      return { name: str_(r.RoleName), perms: SolarLogic.parsePermissions(r.Permissions), builtIn: false };
+    }
+  }
+  return null;
 }
 
 function verifyGoogleIdToken_(idToken) {
@@ -319,12 +338,25 @@ function handleGoogleRedirect_(credential) {
 }
 
 function assert_(user, action, pole) {
-  var reason = SolarLogic.denyReason(user.role, action, pole);
+  if (action === 'view') return; // any signed-in user with an active role
+  var reason = SolarLogic.denyReason(user.perms, action, pole);
   if (reason) throw apiError_('FORBIDDEN', reason);
 }
 
+/** Find a pole by ID: case/space-insensitive; also by an old ID (PreviousIDs) so items queued before a rename still arrive. */
+function findPole_(t, poleId) {
+  var id = str_(poleId).trim();
+  if (!id) return null;
+  var i;
+  for (i = 0; i < t.rows.length; i++) if (SolarLogic.sameId(t.rows[i].PoleID, id)) return t.rows[i];
+  for (i = 0; i < t.rows.length; i++) {
+    var prev = str_(t.rows[i].PreviousIDs).split(',');
+    for (var k = 0; k < prev.length; k++) if (prev[k].trim() && SolarLogic.sameId(prev[k], id)) return t.rows[i];
+  }
+  return null;
+}
 function getPole_(t, poleId) {
-  var p = find_(t, 'PoleID', poleId);
+  var p = findPole_(t, poleId);
   if (!p) throw apiError_('NOTFOUND', 'Tiang ' + poleId + ' tidak dijumpai.');
   return p;
 }
@@ -333,6 +365,7 @@ function poleOut_(p) {
   var o = clean_([p])[0];
   o.ChainageExact = SolarLogic.bool(o.ChainageExact);
   o.IsDone = SolarLogic.bool(o.IsDone);
+  o.Active = SolarLogic.isActive(o);
   return o;
 }
 
@@ -352,13 +385,12 @@ function activityArg_(v) {
   return a;
 }
 function poleIdsArg_(list, poles) {
-  var ids = (list || []).map(str_);
+  var ids = (list || []).map(function (id) { return getPole_(poles, str_(id)).PoleID; });
   if (!ids.length) throw apiError_('BAD', 'Pilih sekurang-kurangnya satu tiang.');
   var seen = {};
   ids.forEach(function (id) {
-    if (seen[id]) throw apiError_('BAD', 'Tiang berulang: ' + id);
-    seen[id] = true;
-    getPole_(poles, id);
+    if (seen[id.toUpperCase()]) throw apiError_('BAD', 'Tiang berulang: ' + id);
+    seen[id.toUpperCase()] = true;
   });
   return ids.sort();
 }
@@ -374,15 +406,18 @@ ACTIONS.me = function (user) { return { user: user }; };
 /** Everything the app needs in one call. */
 ACTIONS.bootstrap = function (user) {
   assert_(user, 'view');
-  var isAdmin = SolarLogic.can(user.role, 'viewHidden');
+  var isAdmin = SolarLogic.can(user.perms, 'hide_photo');
   var users = readTable_('Users').rows;
   var names = {};
   users.forEach(function (u) { names[normEmail_(u.Email)] = str_(u.Name) || str_(u.Email); });
   var photos = readTable_('Photos').rows.map(photoOut_).filter(function (p) { return isAdmin || !p.Hidden; });
   var audit = readTable_('AuditLog', 400).rows;
   var feedActions = ['PhotoAdded', 'NoteAdded', 'MarkedDone', 'DoneCancelled', 'CategoryChanged', 'PoleEdited',
-    'RetakeFlagged', 'RetakeCleared', 'ReportGenerated'];
-  var feed = audit.filter(function (a) { return feedActions.indexOf(a.Action) >= 0; }).slice(-30).reverse()
+    'RetakeFlagged', 'RetakeCleared', 'ReportGenerated', 'PoleAdded', 'PoleRenamed', 'StatusOverridden', 'PhotoMoved',
+    'PhotosSwapped', 'PhotoDeleted'];
+  var feed = audit.filter(function (a) {
+    return feedActions.indexOf(a.Action) >= 0 && !(a.Action === 'PoleEdited' && a.Field === 'ActualDate');
+  }).slice(-30).reverse()
     .map(function (a) {
       return { Timestamp: a.Timestamp, Name: names[normEmail_(a.UserEmail)] || a.UserEmail, Action: a.Action,
         EntityID: a.EntityID, Field: a.Field, OldValue: a.OldValue, NewValue: a.NewValue };
@@ -399,11 +434,14 @@ ACTIONS.bootstrap = function (user) {
     plans: clean_(readTable_('WorkPlan').rows),
     photos: photos,
     notes: clean_(readTable_('Notes').rows),
-    reports: clean_(readTable_('Reports').rows).reverse(),
+    reports: SolarLogic.can(user.perms, 'download_report') || SolarLogic.can(user.perms, 'generate_report')
+      ? clean_(readTable_('Reports').rows).reverse() : [],
+    labels: SolarLogic.labels(s),
     names: names,
-    feed: feed
+    feed: SolarLogic.can(user.perms, 'view_dashboard') ? feed : []
   };
-  if (SolarLogic.can(user.role, 'manageUsers')) out.users = clean_(users).map(function (u) { u.Active = SolarLogic.bool(u.Active); return u; });
+  if (SolarLogic.can(user.perms, 'manage_users')) out.users = clean_(users).map(function (u) { u.Active = SolarLogic.bool(u.Active); return u; });
+  if (SolarLogic.can(user.perms, 'manage_users') || SolarLogic.can(user.perms, 'manage_roles')) out.roles = rolesOut_();
   return out;
 };
 
@@ -422,12 +460,13 @@ function poleFolder_(poleId) {
 ACTIONS.uploadPhoto = function (user, b) {
   var photoId = str_(req_(b, 'photoId'));
   if (!/^[A-Za-z0-9_-]{8,64}$/.test(photoId)) throw apiError_('BAD', 'PhotoID tidak sah.');
+  assert_(user, 'capture_photo'); // permission first (also for a retried, already-saved photo)
   return withLock_(function () {
     var photos = readTable_('Photos');
     var existing = find_(photos, 'PhotoID', photoId);
     if (existing) return { duplicate: true, photo: photoOut_(existing) };
     var pole = getPole_(readTable_('Poles'), str_(req_(b, 'poleId')));
-    assert_(user, 'uploadPhoto', pole);
+    assert_(user, 'capture_photo', pole);
     var typeId = str_(req_(b, 'typeId'));
     var type = SolarLogic.typeById(typeId);
     if (!type) throw apiError_('BAD', 'Jenis gambar tidak dijumpai: ' + typeId);
@@ -463,9 +502,9 @@ ACTIONS.uploadPhoto = function (user, b) {
 
 /** Small thumbnails for one pole, as base64 (photos stay private in Drive). */
 ACTIONS.getThumbs = function (user, b) {
-  assert_(user, 'viewPhotos');
+  assert_(user, 'view');
   var poleId = str_(req_(b, 'poleId'));
-  var isAdmin = SolarLogic.can(user.role, 'viewHidden');
+  var isAdmin = SolarLogic.can(user.perms, 'hide_photo');
   var allowed = {};
   readTable_('Photos').rows.forEach(function (p) {
     if (p.PoleID === poleId && (isAdmin || !SolarLogic.bool(p.Hidden))) allowed[p.PhotoID] = true;
@@ -487,9 +526,9 @@ ACTIONS.getThumbs = function (user, b) {
 
 /** Full-size watermarked photo as base64. */
 ACTIONS.getPhoto = function (user, b) {
-  assert_(user, 'viewPhotos');
+  assert_(user, 'view');
   var p = find_(readTable_('Photos'), 'PhotoID', str_(req_(b, 'photoId')));
-  if (!p || (SolarLogic.bool(p.Hidden) && !SolarLogic.can(user.role, 'viewHidden'))) throw apiError_('NOTFOUND', 'Gambar tidak dijumpai.');
+  if (!p || (SolarLogic.bool(p.Hidden) && !SolarLogic.can(user.perms, 'hide_photo'))) throw apiError_('NOTFOUND', 'Gambar tidak dijumpai.');
   var blob = DriveApp.getFileById(p.DriveFileID).getBlob();
   return { mime: 'image/jpeg', b64: Utilities.base64Encode(blob.getBytes()) };
 };
@@ -500,12 +539,13 @@ ACTIONS.addNote = function (user, b) {
   var text = str_(req_(b, 'text')).trim();
   if (!text) throw apiError_('BAD', 'Nota kosong.');
   if (text.length > 2000) throw apiError_('BAD', 'Nota terlalu panjang (maksimum 2000 aksara).');
+  assert_(user, 'add_note');
   return withLock_(function () {
     var notes = readTable_('Notes');
     var ex = find_(notes, 'NoteID', noteId);
     if (ex) return { duplicate: true, note: clean_([ex])[0] };
     var pole = getPole_(readTable_('Poles'), str_(req_(b, 'poleId')));
-    assert_(user, 'addNote', pole);
+    assert_(user, 'add_note', pole);
     var row = appendObj_(notes, { NoteID: noteId, PoleID: pole.PoleID, Text: text, CreatedBy: user.email,
       CreatedAt: str_(b.createdAt) || nowIso_() });
     audit_(user, 'NoteAdded', 'Note', noteId, 'PoleID', '', pole.PoleID);
@@ -519,42 +559,73 @@ ACTIONS.setDone = function (user, b) {
   return withLock_(function () {
     var poles = readTable_('Poles');
     var pole = getPole_(poles, str_(req_(b, 'poleId')));
-    assert_(user, 'setDone', pole);
+    assert_(user, 'mark_done', pole);
     var was = SolarLogic.bool(pole.IsDone);
     if (was !== done) {
       var now = nowIso_();
-      updateObj_(poles, pole, done ? { IsDone: true, DoneBy: user.email, DoneAt: now, UpdatedAt: now }
-        : { IsDone: false, DoneBy: '', DoneAt: '', UpdatedAt: now });
+      var upd = done ? { IsDone: true, DoneBy: user.email, DoneAt: now, UpdatedAt: now }
+        : { IsDone: false, DoneBy: '', DoneAt: '', UpdatedAt: now };
+      if (done && !str_(pole.ActualDate)) upd.ActualDate = now.slice(0, 10);
+      if (!done && str_(pole.ActualDate)) upd.ActualDate = '';
+      if (str_(pole.StatusOverride)) upd.StatusOverride = ''; // the latest action wins over an admin override
       audit_(user, done ? 'MarkedDone' : 'DoneCancelled', 'Pole', pole.PoleID, 'IsDone', was, done);
+      if ('ActualDate' in upd) audit_(user, 'PoleEdited', 'Pole', pole.PoleID, 'ActualDate', pole.ActualDate, upd.ActualDate);
+      if ('StatusOverride' in upd) audit_(user, 'StatusOverridden', 'Pole', pole.PoleID, 'StatusOverride', pole.StatusOverride, '');
+      updateObj_(poles, pole, upd);
     }
     return { pole: poleOut_(pole) };
   });
 };
 
-/** Admin: edit chainage, bound, planned date, category. Each changed field is logged. */
+/**
+ * Edit pole fields: PoleID (rename), Chainage, Bound, Category, ActualDate, RIN numbers (PlannedDate still accepted, not shown).
+ * Same CH + Bound as another pole -> {needsConfirm, warnings} unless b.confirm. Every changed field is logged.
+ */
+var POLE_EDIT_FIELDS = ['PoleID', 'Chainage', 'Bound', 'Category', 'ActualDate', 'PlannedDate', 'RINPegging', 'RINTrialPit', 'RINInstallation'];
 ACTIONS.editPole = function (user, b) {
   var ch = b.changes || {};
-  var allowedFields = ['Chainage', 'Bound', 'PlannedDate', 'Category'];
   Object.keys(ch).forEach(function (k) {
-    if (allowedFields.indexOf(k) < 0) throw apiError_('BAD', 'Medan tidak boleh diubah: ' + k);
+    if (POLE_EDIT_FIELDS.indexOf(k) < 0) throw apiError_('BAD', 'Medan tidak boleh diubah: ' + k);
   });
-  assert_(user, 'editPole');
-  if ('Category' in ch) assert_(user, 'setCategory');
+  var onlyRin = Object.keys(ch).every(function (k) { return /^RIN/.test(k); });
+  var onlyDate = Object.keys(ch).every(function (k) { return k === 'ActualDate'; });
+  if (!(SolarLogic.can(user.perms, 'edit_pole') || (onlyRin && SolarLogic.can(user.perms, 'record_rin')) ||
+      (onlyDate && SolarLogic.can(user.perms, 'override_status')))) {
+    throw apiError_('FORBIDDEN', 'Anda tiada kebenaran untuk tindakan ini.');
+  }
   if ('Bound' in ch && ['EB', 'WB'].indexOf(ch.Bound) < 0) throw apiError_('BAD', 'Bound mesti EB atau WB.');
   if ('Category' in ch && SolarLogic.CATEGORIES.indexOf(ch.Category) < 0) throw apiError_('BAD', 'Kategori tidak sah.');
-  if ('PlannedDate' in ch && ch.PlannedDate !== '' && !/^\d{4}-\d{2}-\d{2}$/.test(str_(ch.PlannedDate))) {
-    throw apiError_('BAD', 'Tarikh mesti dalam format YYYY-MM-DD.');
-  }
+  ['PlannedDate', 'ActualDate'].forEach(function (k) {
+    if (k in ch && ch[k] !== '' && !SolarLogic.isIsoDate(str_(ch[k]))) throw apiError_('BAD', 'Tarikh mesti dalam format YYYY-MM-DD.');
+  });
   if ('Chainage' in ch && !str_(ch.Chainage).trim()) throw apiError_('BAD', 'Chainage tidak boleh kosong.');
+  ['RINPegging', 'RINTrialPit', 'RINInstallation'].forEach(function (k) {
+    if (k in ch && str_(ch[k]).length > 60) throw apiError_('BAD', 'No. RIN terlalu panjang.');
+  });
   return withLock_(function () {
     var poles = readTable_('Poles');
     var pole = getPole_(poles, str_(req_(b, 'poleId')));
+    var newId = pole.PoleID;
+    if ('PoleID' in ch) {
+      var v = SolarLogic.validatePoleId(ch.PoleID);
+      if (!v.ok) throw apiError_('BAD', v.error);
+      newId = v.id;
+      poles.rows.forEach(function (o) {
+        if (o !== pole && SolarLogic.sameId(o.PoleID, newId)) throw apiError_('BAD', 'ID tiang "' + newId + '" sudah digunakan oleh tiang ' + o.PoleID + '.');
+      });
+    }
+    var chainage = 'Chainage' in ch ? str_(ch.Chainage).trim() : str_(pole.Chainage);
+    var bound = 'Bound' in ch ? str_(ch.Bound) : str_(pole.Bound);
+    if (('Chainage' in ch || 'Bound' in ch) && !b.confirm) {
+      var w = chBoundWarnings_(poles, chainage, bound, pole);
+      if (w.length) return { needsConfirm: true, warnings: w };
+    }
     var upd = {};
-    allowedFields.forEach(function (k) {
-      if (!(k in ch)) return;
-      var nv = k === 'Chainage' ? str_(ch[k]).trim() : str_(ch[k]);
+    POLE_EDIT_FIELDS.forEach(function (k) {
+      if (!(k in ch) || k === 'PoleID') return;
+      var nv = k === 'Chainage' || /^RIN/.test(k) ? str_(ch[k]).trim() : str_(ch[k]);
       if (nv === str_(pole[k])) return;
-      audit_(user, k === 'Category' ? 'CategoryChanged' : 'PoleEdited', 'Pole', pole.PoleID, k, pole[k], nv);
+      audit_(user, k === 'Category' ? 'CategoryChanged' : /^RIN/.test(k) ? 'RinRecorded' : 'PoleEdited', 'Pole', pole.PoleID, k, pole[k], nv);
       upd[k] = nv;
     });
     if ('Chainage' in upd) {
@@ -568,17 +639,78 @@ ACTIONS.editPole = function (user, b) {
       upd.UpdatedAt = nowIso_();
       updateObj_(poles, pole, upd);
     }
+    if (newId !== pole.PoleID) renamePole_(user, poles, pole, newId);
     return { pole: poleOut_(pole) };
   });
 };
+
+function chBoundWarnings_(poles, chainage, bound, self) {
+  var out = [];
+  poles.rows.forEach(function (o) {
+    if (o !== self && str_(o.Chainage).trim() === str_(chainage).trim() && str_(o.Bound) === str_(bound)) {
+      out.push('CH ' + chainage + ' (' + bound + ') sama dengan tiang ' + o.PoleID + '.');
+    }
+  });
+  return out;
+}
+
+/** Rename a pole everywhere: Poles (+PreviousIDs), Photos, Notes, WorkPlan, Reports list, Drive folder + file names. */
+function renamePole_(user, poles, pole, newId) {
+  var oldId = pole.PoleID;
+  var prev = str_(pole.PreviousIDs).split(',').map(function (x) { return x.trim(); }).filter(Boolean);
+  if (prev.indexOf(oldId) < 0) prev.push(oldId);
+  prev = prev.filter(function (x) { return !SolarLogic.sameId(x, newId); });
+  updateObj_(poles, pole, { PoleID: newId, PreviousIDs: prev.join(', '), UpdatedAt: nowIso_() });
+  var counts = {};
+  ['Photos', 'Notes', 'WorkPlan'].forEach(function (name) {
+    var t = readTable_(name);
+    counts[name] = 0;
+    t.rows.forEach(function (r) { if (r.PoleID === oldId) { updateObj_(t, r, { PoleID: newId }); counts[name]++; } });
+  });
+  var rep = readTable_('Reports');
+  counts.Reports = 0;
+  rep.rows.forEach(function (r) {
+    var list = str_(r.PoleIDs).split(/\s*,\s*/);
+    if (list.indexOf(oldId) >= 0) {
+      updateObj_(rep, r, { PoleIDs: list.map(function (x) { return x === oldId ? newId : x; }).join(', ') });
+      counts.Reports++;
+    }
+  });
+  var rootId = settings_().PhotosFolderID;
+  if (rootId) {
+    var root = DriveApp.getFolderById(rootId);
+    var it = root.getFoldersByName(oldId);
+    if (it.hasNext()) {
+      var f = it.next();
+      var ex = root.getFoldersByName(newId);
+      var target = f;
+      if (ex.hasNext()) {
+        target = ex.next();
+        var fi = f.getFiles();
+        while (fi.hasNext()) fi.next().moveTo(target);
+        f.setTrashed(true);
+      } else {
+        f.setName(newId);
+      }
+      var files = target.getFiles();
+      while (files.hasNext()) {
+        var file = files.next();
+        if (file.getName().indexOf(oldId + '_') === 0) file.setName(newId + file.getName().slice(oldId.length));
+      }
+    }
+  }
+  audit_(user, 'PoleRenamed', 'Pole', newId, 'PoleID', oldId, newId);
+  audit_(user, 'PoleRenamed', 'Pole', newId, 'References', '', 'Photos ' + counts.Photos + ', Notes ' + counts.Notes +
+    ', WorkPlan ' + counts.WorkPlan + ', Reports ' + counts.Reports);
+}
 
 /** Admin: Hidden / RetakeFlag on/off. Photos are never deleted. */
 ACTIONS.setPhotoFlag = function (user, b) {
   var field = str_(b.field);
   var value = b.value === true;
   var map = {
-    Hidden: { perm: 'hidePhoto', on: 'PhotoHidden', off: 'PhotoUnhidden' },
-    RetakeFlag: { perm: 'flagRetake', on: 'RetakeFlagged', off: 'RetakeCleared' }
+    Hidden: { perm: 'hide_photo', on: 'PhotoHidden', off: 'PhotoUnhidden' },
+    RetakeFlag: { perm: 'hide_photo', on: 'RetakeFlagged', off: 'RetakeCleared' }
   };
   if (!map[field]) throw apiError_('BAD', 'Medan tidak sah.');
   assert_(user, map[field].perm);
@@ -587,13 +719,15 @@ ACTIONS.setPhotoFlag = function (user, b) {
     var p = find_(photos, 'PhotoID', str_(req_(b, 'photoId')));
     if (!p) throw apiError_('NOTFOUND', 'Gambar tidak dijumpai.');
     var was = SolarLogic.bool(p[field]);
+    var cleared = [];
     if (was !== value) {
       var upd = {};
       upd[field] = value;
       updateObj_(photos, p, upd);
       audit_(user, value ? map[field].on : map[field].off, 'Photo', p.PhotoID, field, was, value);
+      if (field === 'Hidden' && value && Number(p.ReportOrder) > 0) cleared = clearSelection_(user, photos, p.PoleID, p.PhotoTypeID);
     }
-    return { photo: photoOut_(p) };
+    return { photo: photoOut_(p), photos: cleared };
   });
 };
 
@@ -602,7 +736,7 @@ ACTIONS.setPhotoFlag = function (user, b) {
  * photoIds in report order: exactly 1 (C1: exactly 4). An empty list clears the choice (automatic default).
  */
 ACTIONS.setReportSelection = function (user, b) {
-  assert_(user, 'selectReport');
+  assert_(user, 'select_report_photos');
   var typeId = str_(req_(b, 'typeId'));
   var type = SolarLogic.typeById(typeId);
   if (!type) throw apiError_('BAD', 'Jenis gambar tidak sah.');
@@ -613,8 +747,7 @@ ACTIONS.setReportSelection = function (user, b) {
   var seen = {};
   ids.forEach(function (id) { if (seen[id]) throw apiError_('BAD', 'Gambar berulang.'); seen[id] = true; });
   return withLock_(function () {
-    var poleId = str_(req_(b, 'poleId'));
-    getPole_(readTable_('Poles'), poleId);
+    var poleId = getPole_(readTable_('Poles'), str_(req_(b, 'poleId'))).PoleID;
     var photos = readTable_('Photos');
     ids.forEach(function (id) {
       var p = find_(photos, 'PhotoID', id);
@@ -640,11 +773,13 @@ ACTIONS.setReportSelection = function (user, b) {
 
 // ---------------- Users ----------------
 ACTIONS.saveUser = function (user, b) {
-  assert_(user, 'manageUsers');
+  assert_(user, 'manage_users');
   var email = normEmail_(req_(b, 'email'));
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw apiError_('BAD', 'Emel tidak sah.');
-  var role = str_(req_(b, 'role'));
-  if (SolarLogic.ROLES.indexOf(role) < 0) throw apiError_('BAD', 'Peranan tidak sah.');
+  var role = str_(req_(b, 'role')).trim();
+  var roleInfo = roleOf_(role);
+  if (!roleInfo) throw apiError_('BAD', 'Peranan tidak sah atau tidak aktif: ' + role);
+  role = roleInfo.name;
   var active = b.active !== false;
   var name = str_(b.name).trim();
   return withLock_(function () {
@@ -653,6 +788,9 @@ ACTIONS.saveUser = function (user, b) {
     if (u) {
       if (email === user.email && (role !== 'Admin' || !active)) {
         throw apiError_('BAD', 'Anda tidak boleh membuang peranan Admin atau menyahaktifkan akaun anda sendiri.');
+      }
+      if (SolarLogic.sameId(u.Role, 'Admin') && SolarLogic.bool(u.Active) && (role !== 'Admin' || !active) && activeAdmins_(users) <= 1) {
+        throw apiError_('BAD', 'Mesti ada sekurang-kurangnya seorang Admin aktif.');
       }
       var upd = {};
       if (str_(u.Name) !== name) upd.Name = name;
@@ -671,30 +809,89 @@ ACTIONS.saveUser = function (user, b) {
 };
 
 ACTIONS.removeUser = function (user, b) {
-  assert_(user, 'manageUsers');
+  assert_(user, 'manage_users');
   var email = normEmail_(req_(b, 'email'));
   if (email === user.email) throw apiError_('BAD', 'Anda tidak boleh membuang akaun anda sendiri.');
   return withLock_(function () {
     var users = readTable_('Users');
     var u = findUser_(users, email);
     if (!u) throw apiError_('NOTFOUND', 'Pengguna tidak dijumpai.');
+    if (SolarLogic.sameId(u.Role, 'Admin') && SolarLogic.bool(u.Active) && activeAdmins_(users) <= 1) {
+      throw apiError_('BAD', 'Mesti ada sekurang-kurangnya seorang Admin aktif.');
+    }
     users.sheet.deleteRow(u._row);
     audit_(user, 'UserRemoved', 'User', email, 'Role', u.Role, '');
     return {};
   });
 };
 
+function activeAdmins_(users) {
+  return users.rows.filter(function (u) { return SolarLogic.sameId(u.Role, 'Admin') && SolarLogic.bool(u.Active); }).length;
+}
+
+// ---------------- Roles ----------------
+function rolesOut_() {
+  var out = [{ RoleName: 'Admin', Permissions: SolarLogic.ALL_PERMISSIONS.slice(), BuiltIn: true, Active: true }];
+  readTable_('Roles').rows.forEach(function (r) {
+    if (SolarLogic.sameId(r.RoleName, 'Admin')) return;
+    out.push({ RoleName: str_(r.RoleName), Permissions: SolarLogic.parsePermissions(r.Permissions), BuiltIn: false, Active: SolarLogic.bool(r.Active) });
+  });
+  return out;
+}
+
+/** Create / rename / edit / (de)activate a role. { originalName?, name, permissions: [], active } — Admin cannot be changed. */
+ACTIONS.saveRole = function (user, b) {
+  assert_(user, 'manage_roles');
+  var name = str_(req_(b, 'name')).trim().replace(/\s+/g, ' ');
+  var orig = str_(b.originalName).trim();
+  if (SolarLogic.sameId(name, 'Admin') || SolarLogic.sameId(orig, 'Admin')) throw apiError_('BAD', 'Peranan Admin terbina dalam dan tidak boleh diubah.');
+  if (name.length > 30) throw apiError_('BAD', 'Nama peranan maksimum 30 aksara.');
+  if (/[,;]/.test(name)) throw apiError_('BAD', 'Nama peranan tidak boleh mengandungi koma.');
+  var perms = SolarLogic.parsePermissions(b.permissions || []);
+  var unknown = (b.permissions || []).filter(function (k) { return SolarLogic.ALL_PERMISSIONS.indexOf(k) < 0; });
+  if (unknown.length) throw apiError_('BAD', 'Kebenaran tidak dikenali: ' + unknown.join(', '));
+  var active = b.active !== false;
+  return withLock_(function () {
+    var t = readTable_('Roles');
+    var row = orig ? null : undefined;
+    t.rows.forEach(function (r) { if (orig && SolarLogic.sameId(r.RoleName, orig)) row = r; });
+    if (orig && !row) throw apiError_('NOTFOUND', 'Peranan tidak dijumpai: ' + orig);
+    t.rows.forEach(function (r) {
+      if (r !== row && SolarLogic.sameId(r.RoleName, name)) throw apiError_('BAD', 'Nama peranan "' + name + '" sudah wujud.');
+    });
+    var permText = perms.join(', ');
+    if (!row) {
+      appendObj_(t, { RoleName: name, Permissions: permText, BuiltIn: false, Active: active });
+      audit_(user, 'RoleAdded', 'Role', name, 'Permissions', '', permText);
+    } else {
+      var oldName = str_(row.RoleName);
+      var upd = {};
+      if (oldName !== name) upd.RoleName = name;
+      if (SolarLogic.parsePermissions(row.Permissions).join(', ') !== permText) upd.Permissions = permText;
+      if (SolarLogic.bool(row.Active) !== active) upd.Active = active;
+      Object.keys(upd).forEach(function (k) { audit_(user, k === 'RoleName' ? 'RoleRenamed' : 'RoleEdited', 'Role', name, k, row[k], upd[k]); });
+      if (Object.keys(upd).length) updateObj_(t, row, upd);
+      if (upd.RoleName) {
+        var users = readTable_('Users');
+        users.rows.forEach(function (u) { if (SolarLogic.sameId(u.Role, oldName)) updateObj_(users, u, { Role: name }); });
+      }
+    }
+    return { roles: rolesOut_() };
+  });
+};
+
 // ---------------- Activity / photo type names (IDs and rules are fixed) ----------------
 /** { activities: [{ActivityID, Name, Spec}], types: [{TypeID, Name}] } — only names and the activity spec change. */
 ACTIONS.saveNames = function (user, b) {
-  assert_(user, 'manageTypes');
+  assert_(user, 'edit_settings');
   return withLock_(function () {
     var at = readTable_('Activities'), tt = readTable_('PhotoTypes');
     (b.activities || []).forEach(function (x) {
       var row = find_(at, 'ActivityID', str_(x.ActivityID));
       if (!row) throw apiError_('BAD', 'Aktiviti tidak sah: ' + x.ActivityID);
       var name = str_(x.Name).trim(), spec = str_(x.Spec).trim();
-      if (!name) throw apiError_('BAD', 'Nama aktiviti tidak boleh kosong.');
+      var vn = SolarLogic.validateLabel(name);
+      if (!vn.ok) throw apiError_('BAD', 'Nama aktiviti: ' + vn.error);
       var upd = {};
       if (str_(row.Name) !== name) upd.Name = name;
       if (str_(row.Spec) !== spec) upd.Spec = spec;
@@ -705,7 +902,8 @@ ACTIONS.saveNames = function (user, b) {
       var row = find_(tt, 'TypeID', str_(x.TypeID));
       if (!row) throw apiError_('BAD', 'Jenis gambar tidak sah: ' + x.TypeID);
       var name = str_(x.Name).trim();
-      if (!name) throw apiError_('BAD', 'Nama jenis gambar tidak boleh kosong.');
+      var vt = SolarLogic.validateLabel(name);
+      if (!vt.ok) throw apiError_('BAD', 'Nama jenis gambar: ' + vt.error);
       if (str_(row.Name) !== name) {
         audit_(user, 'PhotoTypeEdited', 'PhotoType', row.TypeID, 'Name', row.Name, name);
         updateObj_(tt, row, { Name: name });
@@ -715,12 +913,34 @@ ACTIONS.saveNames = function (user, b) {
   });
 };
 
+/** Display labels (statuses, cards), stored in Settings as "Label.<key>". { labels: {KEY: text} } */
+ACTIONS.saveLabels = function (user, b) {
+  assert_(user, 'edit_settings');
+  var input = b.labels || {};
+  Object.keys(input).forEach(function (k) {
+    if (!(k in SolarLogic.LABEL_DEFAULTS)) throw apiError_('BAD', 'Label tidak dikenali: ' + k);
+    var v = SolarLogic.validateLabel(input[k]);
+    if (!v.ok) throw apiError_('BAD', SolarLogic.LABEL_DEFAULTS[k] + ': ' + v.error);
+  });
+  return withLock_(function () {
+    var cur = SolarLogic.labels(settings_());
+    Object.keys(input).forEach(function (k) {
+      var nv = str_(input[k]).trim();
+      if (nv !== cur[k]) {
+        setSetting_('Label.' + k, nv);
+        audit_(user, 'LabelEdited', 'Label', k, 'Label', cur[k], nv);
+      }
+    });
+    return { labels: SolarLogic.labels(settings_()) };
+  });
+};
+
 // ---------------- Work plan (Pelan kerja) ----------------
 function planArgs_(b) {
   var date = str_(req_(b, 'date'));
   if (!SolarLogic.isIsoDate(date)) throw apiError_('BAD', 'Tarikh tidak sah.');
   var act = str_(b.activityId);
-  if (act && !REPORT_KEYS[act]) throw apiError_('BAD', 'Aktiviti tidak sah.');
+  if (act && SolarLogic.PLAN_ACTIVITIES.indexOf(act) < 0) throw apiError_('BAD', 'Aktiviti tidak sah.');
   return { date: date, act: act };
 }
 function planText_(p) { return p.PoleID + ' ' + p.Date + (p.Activity ? ' ' + p.Activity : ''); }
@@ -732,7 +952,7 @@ function planDup_(t, poleId, date, act, exceptId) {
 
 /** Admin: plan one or more poles for a date (+ optional activity). Exact duplicates are skipped. */
 ACTIONS.addPlans = function (user, b) {
-  assert_(user, 'planWork');
+  assert_(user, 'plan_work');
   var a = planArgs_(b);
   return withLock_(function () {
     var ids = poleIdsArg_(b.poleIds, readTable_('Poles'));
@@ -750,7 +970,7 @@ ACTIONS.addPlans = function (user, b) {
 };
 
 ACTIONS.editPlan = function (user, b) {
-  assert_(user, 'planWork');
+  assert_(user, 'plan_work');
   var a = planArgs_(b);
   return withLock_(function () {
     var t = readTable_('WorkPlan');
@@ -767,7 +987,7 @@ ACTIONS.editPlan = function (user, b) {
 };
 
 ACTIONS.removePlan = function (user, b) {
-  assert_(user, 'planWork');
+  assert_(user, 'plan_work');
   return withLock_(function () {
     var t = readTable_('WorkPlan');
     var row = find_(t, 'PlanID', str_(req_(b, 'planId')));
@@ -780,7 +1000,7 @@ ACTIONS.removePlan = function (user, b) {
 
 // ---------------- Audit ----------------
 ACTIONS.audit = function (user, b) {
-  assert_(user, 'viewAudit');
+  assert_(user, 'view_audit_log');
   var q = str_(b.q).toLowerCase();
   var rows = clean_(readTable_('AuditLog').rows).reverse();
   if (q) {
@@ -792,17 +1012,381 @@ ACTIONS.audit = function (user, b) {
   return { total: rows.length, rows: rows.slice(offset, offset + limit) };
 };
 
+// ---------------- Pole administration (v3) ----------------
+function newPoleRow_(id, chainage, bound, category) {
+  return { PoleID: id, Bound: bound, Chainage: chainage, ChainageExact: SolarLogic.isChainageExact(chainage), Category: category,
+    PlannedDate: '', IsDone: category === SolarLogic.CATEGORY.INSTALLED, DoneBy: '', DoneAt: '', UpdatedAt: nowIso_(),
+    ActualDate: '', Active: true, PreviousIDs: '', StatusOverride: '', RINPegging: '', RINTrialPit: '', RINInstallation: '' };
+}
+
+/** Add a pole: { poleId, chainage, bound, category, note, confirm }. */
+ACTIONS.addPole = function (user, b) {
+  assert_(user, 'add_pole');
+  var v = SolarLogic.validatePoleId(b.poleId);
+  if (!v.ok) throw apiError_('BAD', v.error);
+  var chainage = str_(b.chainage).trim();
+  if (!chainage) throw apiError_('BAD', 'Chainage tidak boleh kosong.');
+  var bound = str_(b.bound);
+  if (['EB', 'WB'].indexOf(bound) < 0) throw apiError_('BAD', 'Bound mesti EB atau WB.');
+  var category = str_(b.category) || SolarLogic.CATEGORY.TODO;
+  if (SolarLogic.CATEGORIES.indexOf(category) < 0) throw apiError_('BAD', 'Kategori tidak sah.');
+  return withLock_(function () {
+    var poles = readTable_('Poles');
+    var dup = findPole_(poles, v.id);
+    if (dup && SolarLogic.sameId(dup.PoleID, v.id)) throw apiError_('BAD', 'ID tiang "' + v.id + '" sudah digunakan oleh tiang ' + dup.PoleID + '.');
+    if (!b.confirm) {
+      var w = chBoundWarnings_(poles, chainage, bound, null);
+      if (w.length) return { needsConfirm: true, warnings: w };
+    }
+    var row = appendObj_(poles, newPoleRow_(v.id, chainage, bound, category));
+    audit_(user, 'PoleAdded', 'Pole', v.id, 'Chainage/Bound/Category', '', chainage + ' / ' + bound + ' / ' + category);
+    var note = str_(b.note).trim();
+    if (note) {
+      var noteId = 'N' + Utilities.getUuid().replace(/-/g, '').slice(0, 12);
+      appendObj_(readTable_('Notes'), { NoteID: noteId, PoleID: v.id, Text: note.slice(0, 2000), CreatedBy: user.email, CreatedAt: nowIso_() });
+      audit_(user, 'NoteAdded', 'Note', noteId, 'PoleID', '', v.id);
+    }
+    return { pole: poleOut_(row) };
+  });
+};
+
+/** Deactivate (hidden from lists and totals, data kept) or reactivate. */
+ACTIONS.setPoleActive = function (user, b) {
+  assert_(user, 'delete_pole');
+  var active = b.active !== false;
+  return withLock_(function () {
+    var poles = readTable_('Poles');
+    var pole = getPole_(poles, str_(req_(b, 'poleId')));
+    if (SolarLogic.isActive(pole) !== active) {
+      audit_(user, active ? 'PoleReactivated' : 'PoleDeactivated', 'Pole', pole.PoleID, 'Active', !active, active);
+      updateObj_(poles, pole, { Active: active, UpdatedAt: nowIso_() });
+    }
+    return { pole: poleOut_(pole) };
+  });
+};
+
+/** Delete a pole with no photos. Strong confirmation: b.confirmId must equal the Pole ID. Its plans are removed, notes kept. */
+ACTIONS.deletePole = function (user, b) {
+  assert_(user, 'delete_pole');
+  return withLock_(function () {
+    var poles = readTable_('Poles');
+    var pole = getPole_(poles, str_(req_(b, 'poleId')));
+    if (!SolarLogic.sameId(b.confirmId, pole.PoleID)) throw apiError_('BAD', 'Taip ID tiang (' + pole.PoleID + ') untuk sahkan pemadaman.');
+    var photos = readTable_('Photos').rows.filter(function (p) { return p.PoleID === pole.PoleID; });
+    if (photos.length) throw apiError_('BAD', 'Pindah atau padam gambar dahulu (' + photos.length + ' gambar pada ' + pole.PoleID + ').');
+    var plans = readTable_('WorkPlan');
+    plans.rows.filter(function (r) { return r.PoleID === pole.PoleID; }).sort(function (a, c) { return c._row - a._row; })
+      .forEach(function (r) {
+        plans.sheet.deleteRow(r._row);
+        audit_(user, 'PlanRemoved', 'WorkPlan', r.PlanID, 'Pole/Date/Activity', planText_(r), '');
+      });
+    var rootId = settings_().PhotosFolderID;
+    if (rootId) {
+      var it = DriveApp.getFolderById(rootId).getFoldersByName(pole.PoleID);
+      if (it.hasNext()) {
+        var f = it.next();
+        if (!f.getFiles().hasNext()) f.setTrashed(true); // empty folder -> Drive Trash (never permanent)
+      }
+    }
+    poles.sheet.deleteRow(pole._row);
+    audit_(user, 'PoleDeleted', 'Pole', pole.PoleID, 'Chainage/Bound/Category', pole.Chainage + ' / ' + pole.Bound + ' / ' + pole.Category, '');
+    return {};
+  });
+};
+
+/** Admin sets the work status regardless of photos: status '' (automatic) | NOT_STARTED | IN_PROGRESS | DONE; optional actualDate. */
+ACTIONS.overrideStatus = function (user, b) {
+  assert_(user, 'override_status');
+  var st = str_(b.status);
+  if (st && !SolarLogic.OVERRIDES[st]) throw apiError_('BAD', 'Status tidak sah.');
+  var date = b.actualDate === undefined ? null : str_(b.actualDate);
+  if (date && !SolarLogic.isIsoDate(date)) throw apiError_('BAD', 'Tarikh mesti dalam format YYYY-MM-DD.');
+  return withLock_(function () {
+    var poles = readTable_('Poles');
+    var pole = getPole_(poles, str_(req_(b, 'poleId')));
+    if (pole.Category !== SolarLogic.CATEGORY.TODO) throw apiError_('BAD', 'Status hanya boleh diubah untuk tiang kategori Perlu pasang.');
+    var upd = {};
+    if (st !== str_(pole.StatusOverride)) upd.StatusOverride = st;
+    if (st === 'DONE' && date === null && !str_(pole.ActualDate)) date = nowIso_().slice(0, 10);
+    if (date !== null && date !== str_(pole.ActualDate)) upd.ActualDate = date;
+    Object.keys(upd).forEach(function (k) {
+      audit_(user, k === 'StatusOverride' ? 'StatusOverridden' : 'PoleEdited', 'Pole', pole.PoleID, k, pole[k], upd[k]);
+    });
+    if (Object.keys(upd).length) { upd.UpdatedAt = nowIso_(); updateObj_(poles, pole, upd); }
+    return { pole: poleOut_(pole) };
+  });
+};
+
+/** RIN number for one pole + activity ('' clears). */
+ACTIONS.setRin = function (user, b) {
+  assert_(user, 'record_rin');
+  var act = activityArg_(b.activityId);
+  var rin = str_(b.rin).trim();
+  if (rin.length > 60) throw apiError_('BAD', 'No. RIN terlalu panjang.');
+  return withLock_(function () {
+    var poles = readTable_('Poles');
+    var pole = getPole_(poles, str_(req_(b, 'poleId')));
+    var field = SolarLogic.RIN_FIELD[act];
+    if (str_(pole[field]) !== rin) {
+      audit_(user, 'RinRecorded', 'Pole', pole.PoleID, field, pole[field], rin);
+      var u = { UpdatedAt: nowIso_() }; u[field] = rin;
+      updateObj_(poles, pole, u);
+    }
+    return { pole: poleOut_(pole) };
+  });
+};
+
+/** Import step 1: validate rows (nothing saved). rows: [{PoleID, Chainage, Bound, Category}] */
+ACTIONS.importPreview = function (user, b) {
+  assert_(user, 'import_poles');
+  var rows = b.rows || [];
+  if (!rows.length) throw apiError_('BAD', 'Fail tiada baris.');
+  if (rows.length > 2000) throw apiError_('BAD', 'Maksimum 2000 baris.');
+  return { rows: SolarLogic.validateImport(rows, readTable_('Poles').rows) };
+};
+
+/** Import step 2 (after confirmation): add new poles; existing ones are skipped or updated (onExisting). Rows with errors are never saved. */
+ACTIONS.importPoles = function (user, b) {
+  assert_(user, 'import_poles');
+  var onExisting = str_(b.onExisting);
+  return withLock_(function () {
+    var poles = readTable_('Poles');
+    var res = SolarLogic.validateImport(b.rows || [], poles.rows);
+    if (res.some(function (r) { return r.status === 'exists'; }) && ['skip', 'update'].indexOf(onExisting) < 0) {
+      throw apiError_('BAD', 'Pilih sama ada tiang sedia ada dilangkau atau dikemas kini.');
+    }
+    var added = 0, updated = 0, skipped = 0, errors = 0;
+    res.forEach(function (r) {
+      if (r.status === 'error') { errors++; return; }
+      if (r.status === 'exists') {
+        if (onExisting !== 'update') { skipped++; return; }
+        var p = getPole_(poles, r.existingId);
+        var upd = {};
+        if (str_(p.Chainage) !== r.Chainage) upd.Chainage = r.Chainage;
+        if (str_(p.Bound) !== r.Bound) upd.Bound = r.Bound;
+        if (str_(p.Category) !== r.Category) upd.Category = r.Category;
+        Object.keys(upd).forEach(function (k) { audit_(user, k === 'Category' ? 'CategoryChanged' : 'PoleEdited', 'Pole', p.PoleID, k, p[k], upd[k]); });
+        if ('Chainage' in upd) upd.ChainageExact = SolarLogic.isChainageExact(upd.Chainage);
+        if (Object.keys(upd).length) { upd.UpdatedAt = nowIso_(); updateObj_(poles, p, upd); updated++; } else skipped++;
+        return;
+      }
+      appendObj_(poles, newPoleRow_(r.PoleID, r.Chainage, r.Bound, r.Category));
+      audit_(user, 'PoleAdded', 'Pole', r.PoleID, 'Import', '', r.Chainage + ' / ' + r.Bound + ' / ' + r.Category);
+      added++;
+    });
+    audit_(user, 'PolesImported', 'Pole', '', 'Import', '', 'baru ' + added + ', kemas kini ' + updated + ', langkau ' + skipped + ', ralat ' + errors);
+    return { added: added, updated: updated, skipped: skipped, errors: errors, poles: poles.rows.map(poleOut_) };
+  });
+};
+
+/** Export all poles as .xlsx (base64). Built in a temporary Google Sheet that is moved to Drive Trash afterwards. */
+ACTIONS.exportPoles = function (user) {
+  assert_(user, 'export_data');
+  var poles = readTable_('Poles').rows.map(poleOut_);
+  var photos = readTable_('Photos').rows.map(photoOut_);
+  var plans = clean_(readTable_('WorkPlan').rows);
+  var types = typesNow_(), acts = activitiesNow_();
+  var labels = SolarLogic.labels(settings_());
+  var today = nowIso_().slice(0, 10);
+  var lab = function (ws) { return labels[SolarLogic.workKey(ws)] || ws; };
+  var head = ['Pole ID', 'CH', 'Bound', 'Category', 'Active', 'Work status', 'Perlu gambar malam', 'Next planned date', 'Actual completion date',
+    'Photo progress', acts[0].Name, acts[1].Name, acts[2].Name, 'RIN Pegging', 'RIN Trial Pit', 'RIN Installation', 'Previous IDs'];
+  var data = [head];
+  SolarLogic.sortPolesByChainage(poles).forEach(function (p) {
+    var ps = SolarLogic.photoStatus(p, types, photos, acts);
+    var a = ps.activities.map(function (x) { return x.done + '/' + x.total; });
+    data.push([p.PoleID, p.Chainage, p.Bound, p.Category === SolarLogic.CATEGORY.INSTALLED ? labels.INSTALLED : p.Category === SolarLogic.CATEGORY.PENDING ? labels.PENDING : p.Category,
+      p.Active ? 'Ya' : 'Tidak', lab(SolarLogic.workStatus(p, photos)), SolarLogic.needsNightPhoto(p, photos) ? 'Ya' : '',
+      SolarLogic.nextPlanDate(plans, p.PoleID, today), str_(p.ActualDate), ps.required ? (ps.complete ? 'Lengkap' : ps.done + '/' + ps.total) : ps.label,
+      a[0], a[1], a[2], str_(p.RINPegging), str_(p.RINTrialPit), str_(p.RINInstallation), str_(p.PreviousIDs)].map(cell_));
+  });
+  var name = 'Solar_Poles_' + Utilities.formatDate(new Date(), TZ, 'yyyyMMdd-HHmm');
+  var tmp = SpreadsheetApp.create(name);
+  var file = DriveApp.getFileById(tmp.getId());
+  try {
+    var sh = tmp.getSheets()[0];
+    sh.getRange(1, 1, data.length, head.length).setNumberFormat('@');
+    sh.getRange(1, 1, data.length, head.length).setValues(data);
+    SpreadsheetApp.flush();
+    var res = UrlFetchApp.fetch('https://docs.google.com/spreadsheets/d/' + tmp.getId() + '/export?format=xlsx', {
+      headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() }, muteHttpExceptions: true
+    });
+    if (res.getResponseCode() !== 200) throw apiError_('SERVER', 'Gagal membuat fail Excel (' + res.getResponseCode() + ').');
+    audit_(user, 'DataExported', 'Pole', '', 'Export', '', poles.length + ' tiang');
+    return { name: name + '.xlsx', b64: Utilities.base64Encode(res.getBlob().getBytes()), count: poles.length };
+  } finally {
+    file.setTrashed(true);
+  }
+}
+
+// ---------------- Photo management (v3) ----------------
+/** Clear the report selection of one pole + photo type (all ReportOrder blank). Returns changed photos. */
+function clearSelection_(user, photos, poleId, typeId) {
+  var changed = [];
+  photos.rows.forEach(function (o) {
+    if (o.PoleID === poleId && o.PhotoTypeID === typeId && Number(o.ReportOrder) > 0) {
+      updateObj_(photos, o, { ReportOrder: '' });
+      changed.push(photoOut_(o));
+    }
+  });
+  if (changed.length) audit_(user, 'ReportSelectionCleared', 'Pole', poleId, typeId, '', '');
+  return changed;
+}
+
+function thumbOf_(folder, photoId) {
+  var it = folder.getFilesByName(photoId + '_thumb.jpg');
+  return it.hasNext() ? it.next() : null;
+}
+
+/** Move a photo's Drive file + thumbnail to another pole's folder and rename it. Returns an undo function. */
+function moveDriveFiles_(photo, newPoleId, newTypeId) {
+  var file = DriveApp.getFileById(photo.DriveFileID);
+  var oldFolder = poleFolder_(photo.PoleID);
+  var target = poleFolder_(newPoleId);
+  var thumb = thumbOf_(oldFolder, photo.PhotoID);
+  var oldName = file.getName();
+  var newName = oldName;
+  var m = oldName.match(/^(.*?)_([A-C]\d|S\d)_(.*)$/);
+  if (m && m[1] === photo.PoleID) newName = newPoleId + '_' + newTypeId + '_' + m[3];
+  var done = [];
+  try {
+    file.moveTo(target); done.push(function () { file.moveTo(oldFolder); });
+    if (newName !== oldName) { file.setName(newName); done.push(function () { file.setName(oldName); }); }
+    if (thumb) { thumb.moveTo(target); done.push(function () { thumb.moveTo(oldFolder); }); }
+  } catch (e) {
+    done.reverse().forEach(function (f) { try { f(); } catch (x) { /* best effort */ } });
+    throw e;
+  }
+  return function () { done.reverse().forEach(function (f) { try { f(); } catch (x) { /* best effort */ } }); };
+}
+
+/** Delete: row removed from Photos; photo + thumbnail moved to Drive Trash (never permanent). */
+ACTIONS.deletePhoto = function (user, b) {
+  assert_(user, 'delete_photo');
+  return withLock_(function () {
+    var photos = readTable_('Photos');
+    var p = find_(photos, 'PhotoID', str_(req_(b, 'photoId')));
+    if (!p) throw apiError_('NOTFOUND', 'Gambar tidak dijumpai.');
+    var cleared = Number(p.ReportOrder) > 0 ? clearSelection_(user, photos, p.PoleID, p.PhotoTypeID) : [];
+    try { DriveApp.getFileById(p.DriveFileID).setTrashed(true); } catch (e) { /* file already gone */ }
+    try { var th = thumbOf_(poleFolder_(p.PoleID), p.PhotoID); if (th) th.setTrashed(true); } catch (e2) { /* no thumb */ }
+    photos.sheet.deleteRow(p._row);
+    audit_(user, 'PhotoDeleted', 'Photo', p.PhotoID, 'Pole/Type/DriveFileID', p.PoleID + '/' + p.PhotoTypeID + '/' + p.DriveFileID, '');
+    return { deleted: p.PhotoID, photos: cleared };
+  });
+};
+
+/** Edit the measurement of a Lebar / Panjang / Dalam photo (same validation as entry). */
+ACTIONS.editMeasurement = function (user, b) {
+  assert_(user, 'edit_measurement');
+  var m = SolarLogic.parseMeasurement(b.value);
+  if (!m.ok) throw apiError_('BAD', m.error);
+  return withLock_(function () {
+    var photos = readTable_('Photos');
+    var p = find_(photos, 'PhotoID', str_(req_(b, 'photoId')));
+    if (!p) throw apiError_('NOTFOUND', 'Gambar tidak dijumpai.');
+    var t = SolarLogic.typeById(p.PhotoTypeID);
+    if (!t || !t.NeedsMeasurement) throw apiError_('BAD', 'Jenis gambar ini tiada ukuran.');
+    var nv = SolarLogic.formatMeasurement(m.value);
+    if (str_(p.MeasurementM) !== nv) {
+      audit_(user, 'MeasurementEdited', 'Photo', p.PhotoID, 'MeasurementM', p.MeasurementM, nv);
+      updateObj_(photos, p, { MeasurementM: nv });
+    }
+    return { photo: photoOut_(p) };
+  });
+};
+
+/**
+ * Move photos to another pole: { photoIds: [], targetPoleId, typeId? }. Added to the target's photos (existing ones stay).
+ * Optional new photo type. Measurements move with the photo. All-or-nothing.
+ */
+ACTIONS.movePhotos = function (user, b) {
+  assert_(user, 'move_photo');
+  var ids = (b.photoIds || []).map(str_);
+  if (!ids.length) throw apiError_('BAD', 'Pilih sekurang-kurangnya satu gambar.');
+  var newType = str_(b.typeId);
+  if (newType && !SolarLogic.typeById(newType)) throw apiError_('BAD', 'Jenis gambar tidak sah.');
+  return withLock_(function () {
+    var target = getPole_(readTable_('Poles'), str_(req_(b, 'targetPoleId')));
+    var photos = readTable_('Photos');
+    var rows = ids.map(function (id) {
+      var p = find_(photos, 'PhotoID', id);
+      if (!p) throw apiError_('NOTFOUND', 'Gambar tidak dijumpai: ' + id);
+      return p;
+    });
+    rows.forEach(function (p) {
+      if (p.PoleID === target.PoleID && (!newType || newType === p.PhotoTypeID)) throw apiError_('BAD', 'Gambar sudah berada pada tiang dan jenis ini.');
+    });
+    var undo = [];
+    var logs = [];
+    var clearKeys = {};
+    try {
+      rows.forEach(function (p) {
+        var old = { PoleID: p.PoleID, PhotoTypeID: p.PhotoTypeID, ReportOrder: p.ReportOrder };
+        var t = newType || p.PhotoTypeID;
+        if (Number(p.ReportOrder) > 0) clearKeys[p.PoleID + '|' + p.PhotoTypeID] = [p.PoleID, p.PhotoTypeID];
+        undo.push(moveDriveFiles_(p, target.PoleID, t));
+        updateObj_(photos, p, { PoleID: target.PoleID, PhotoTypeID: t, ReportOrder: '' });
+        undo.push(function () { updateObj_(photos, p, old); });
+        logs.push([p.PhotoID, old.PoleID + '/' + old.PhotoTypeID, target.PoleID + '/' + t]);
+      });
+    } catch (e) {
+      undo.reverse().forEach(function (f) { try { f(); } catch (x) { /* best effort */ } });
+      throw apiError_('SERVER', 'Pindah gambar gagal — tiada perubahan dibuat. (' + e.message + ')');
+    }
+    var changed = [];
+    Object.keys(clearKeys).forEach(function (k) { changed = changed.concat(clearSelection_(user, photos, clearKeys[k][0], clearKeys[k][1])); });
+    logs.forEach(function (l) { audit_(user, 'PhotoMoved', 'Photo', l[0], 'Pole/Type', l[1], l[2]); });
+    return { photos: rows.map(photoOut_).concat(changed) };
+  });
+};
+
+/** Swap all photos (or one activity) between two poles in one action; report selections follow the photos; rollback on failure. */
+ACTIONS.swapPhotos = function (user, b) {
+  assert_(user, 'move_photo');
+  var act = str_(b.activityId);
+  if (act && !REPORT_KEYS[act]) throw apiError_('BAD', 'Aktiviti tidak sah.');
+  return withLock_(function () {
+    var poles = readTable_('Poles');
+    var A = getPole_(poles, str_(req_(b, 'poleA')));
+    var B = getPole_(poles, str_(req_(b, 'poleB')));
+    if (A === B) throw apiError_('BAD', 'Pilih dua tiang yang berbeza.');
+    var photos = readTable_('Photos');
+    var inAct = function (p) { var t = SolarLogic.typeById(p.PhotoTypeID); return !act || (t && t.ActivityID === act); };
+    var rows = photos.rows.filter(function (p) { return (p.PoleID === A.PoleID || p.PoleID === B.PoleID) && inAct(p); });
+    if (!rows.length) throw apiError_('BAD', 'Tiada gambar untuk ditukar.');
+    var undo = [];
+    try {
+      rows.forEach(function (p) {
+        var from = p.PoleID;
+        var to = from === A.PoleID ? B.PoleID : A.PoleID;
+        undo.push(moveDriveFiles_(p, to, p.PhotoTypeID));
+        updateObj_(photos, p, { PoleID: to });
+        undo.push(function () { updateObj_(photos, p, { PoleID: from }); });
+      });
+    } catch (e) {
+      undo.reverse().forEach(function (f) { try { f(); } catch (x) { /* best effort */ } });
+      throw apiError_('SERVER', 'Tukar gambar gagal — semua perubahan dibatalkan. (' + e.message + ')');
+    }
+    var nA = rows.filter(function (p) { return p.PoleID === B.PoleID; }).length;
+    audit_(user, 'PhotosSwapped', 'Pole', A.PoleID + '<->' + B.PoleID, act ? REPORT_KEYS[act] : 'ALL', '',
+      nA + ' gambar ' + A.PoleID + '→' + B.PoleID + ', ' + (rows.length - nA) + ' gambar ' + B.PoleID + '→' + A.PoleID);
+    return { photos: rows.map(photoOut_) };
+  });
+};
+
 // ---------------- Reports (photo pages per activity; PDF + Word) ----------------
 function reportLimit_(activityId) {
   var max = Number(settings_().ReportMaxPhotos) || 60;
   return Math.max(1, Math.floor(max / SolarLogic.reportPhotoCount(activityId)));
 }
 
-/** Before generating: which ticked poles are missing photos/measurements for this activity. */
+/** Before generating: which ticked poles are not Sedia for this activity. */
 ACTIONS.reportCheck = function (user, b) {
-  assert_(user, 'generateReport');
+  assert_(user, 'generate_report');
   var act = activityArg_(b.activityId);
-  var ids = poleIdsArg_(b.poleIds, readTable_('Poles'));
+  var poles = readTable_('Poles');
+  var ids = poleIdsArg_(b.poleIds, poles);
   var photos = readTable_('Photos').rows.map(photoOut_);
   var types = typesNow_();
   var missing = [], ready = [];
@@ -813,9 +1397,13 @@ ACTIONS.reportCheck = function (user, b) {
   return { ready: ready, missing: missing, maxPoles: reportLimit_(act) };
 };
 
+/** Generate the photo pages. Only poles that are Sedia. Optional { rin }: saved to those poles for this activity. */
 ACTIONS.generateReport = function (user, b) {
-  assert_(user, 'generateReport');
+  assert_(user, 'generate_report');
   var act = activityArg_(b.activityId);
+  var rin = str_(b.rin).trim();
+  if (rin) assert_(user, 'record_rin');
+  if (rin.length > 60) throw apiError_('BAD', 'No. RIN terlalu panjang.');
   var ids = poleIdsArg_(b.poleIds, readTable_('Poles'));
   var max = reportLimit_(act);
   if (ids.length > max) throw apiError_('BAD', 'Maksimum ' + max + ' tiang bagi satu laporan ' + activitiesNow_()[act.charCodeAt(0) - 65].Name + '.');
@@ -826,24 +1414,38 @@ ACTIONS.generateReport = function (user, b) {
     var m = SolarLogic.reportMissing(act, id, types, photos);
     if (m.length) bad.push(id + ': ' + m.join(', '));
   });
-  if (bad.length) throw apiError_('BAD', 'Tiang tidak lengkap untuk laporan ini — ' + bad.join('; '));
+  if (bad.length) throw apiError_('BAD', 'Hanya tiang yang Sedia boleh dilaporkan — ' + bad.join('; '));
   var reportId = 'R' + Utilities.formatDate(new Date(), TZ, 'yyyyMMdd-HHmmss') + '-' + Utilities.getUuid().slice(0, 4);
   var spec = SolarLogic.buildReportSpec(act, ids, types, photos);
   var name = 'Laporan_' + REPORT_KEYS[act] + '_' + Utilities.formatDate(new Date(), TZ, 'yyyyMMdd-HHmm') + '_' +
     (ids.length > 1 ? ids[0] + '-' + ids[ids.length - 1] : ids[0]);
   var files = renderReport_(name, spec, photos);
-  var row = withLock_(function () {
+  var out = withLock_(function () {
     var r = appendObj_(readTable_('Reports'), { ReportID: reportId, PoleIDs: ids.join(', '), Activity: act,
       FileURL: files.pdf.getUrl(), DocxURL: files.docx.getUrl(), CreatedBy: user.email, CreatedAt: nowIso_() });
     audit_(user, 'ReportGenerated', 'Report', reportId, REPORT_KEYS[act], '', ids.join(', '));
-    return r;
+    var changed = [];
+    if (rin) {
+      var poles = readTable_('Poles');
+      var field = SolarLogic.RIN_FIELD[act];
+      ids.forEach(function (id) {
+        var p = getPole_(poles, id);
+        if (str_(p[field]) !== rin) {
+          audit_(user, 'RinRecorded', 'Pole', p.PoleID, field, p[field], rin);
+          updateObj_(poles, p, { UpdatedAt: nowIso_() });
+          var u = {}; u[field] = rin; updateObj_(poles, p, u);
+          changed.push(poleOut_(p));
+        }
+      });
+    }
+    return { report: clean_([r])[0], poles: changed };
   });
-  return { report: clean_([row])[0] };
+  return out;
 };
 
 /** Download a generated PDF (format "pdf") or Word file ("docx") in 4 MB pieces (base64). All roles. */
 ACTIONS.downloadReport = function (user, b) {
-  assert_(user, 'downloadReport');
+  assert_(user, 'download_report');
   var r = find_(readTable_('Reports'), 'ReportID', str_(req_(b, 'reportId')));
   if (!r) throw apiError_('NOTFOUND', 'Laporan tidak dijumpai.');
   var url = b.format === 'docx' ? r.DocxURL : r.FileURL;
@@ -948,6 +1550,10 @@ function setup() {
   if (oldPhotos && headerIndex_(oldPhotos, 'SlotID')) {
     throw new Error('Sheet ini masih format lama (v1). Jalankan migrateV2() dahulu.');
   }
+  var oldPoles = ss.getSheetByName('Poles');
+  if (oldPoles && oldPoles.getLastRow() > 0 && !headerIndex_(oldPoles, 'Active')) {
+    throw new Error('Sheet ini masih format v2. Jalankan migrateV3() dahulu.');
+  }
   Object.keys(SCHEMA).forEach(function (name) {
     var sh = ss.getSheetByName(name) || ss.insertSheet(name);
     var headers = SCHEMA[name];
@@ -967,6 +1573,15 @@ function setup() {
   Object.keys(DEFAULT_SETTINGS).forEach(function (k) {
     if (!find_(st, 'Key', k)) appendObj_(st, { Key: k, Value: DEFAULT_SETTINGS[k] });
   });
+  Object.keys(SolarLogic.LABEL_DEFAULTS).forEach(function (k) {
+    if (!find_(st, 'Key', 'Label.' + k)) appendObj_(st, { Key: 'Label.' + k, Value: SolarLogic.LABEL_DEFAULTS[k] });
+  });
+  var rt = readTable_('Roles');
+  SolarLogic.DEFAULT_ROLES.forEach(function (r) {
+    if (!rt.rows.some(function (x) { return SolarLogic.sameId(x.RoleName, r.RoleName); })) {
+      appendObj_(rt, { RoleName: r.RoleName, Permissions: r.BuiltIn ? 'ALL' : r.Permissions.join(', '), BuiltIn: r.BuiltIn, Active: true });
+    }
+  });
   var s = settings_();
   if (!s.PhotosFolderID) setSetting_('PhotosFolderID', DriveApp.createFolder('Solar Photos').getId());
   if (!s.ReportsFolderID) setSetting_('ReportsFolderID', DriveApp.createFolder('Solar Reports').getId());
@@ -977,7 +1592,7 @@ function setup() {
   if (!poles.rows.length) {
     var now = nowIso_();
     var data = SEED_POLES.map(function (p) {
-      return SCHEMA.Poles.map(function (h) { return cell_(h === 'UpdatedAt' ? now : p[h]); });
+      return SCHEMA.Poles.map(function (h) { return cell_(h === 'UpdatedAt' ? now : h === 'Active' ? true : p[h]); });
     });
     poles.sheet.getRange(2, 1, data.length, SCHEMA.Poles.length).setValues(data);
     audit_(me, 'Setup', 'Pole', '', 'Import', '', data.length + ' poles');
@@ -1136,7 +1751,8 @@ function migrateV2() {
     });
   }
 
-  // 6) New tabs, defaults, activity/type names
+  // 6) v3 columns, new tabs, defaults, activity/type names
+  migrateV3Steps_(done);
   setup();
 
   var summary = done.length ? done.length + ' perubahan' : 'tiada perubahan (sudah dimigrasi)';
@@ -1149,3 +1765,94 @@ function migrateV2() {
   return msg;
 }
 
+// =====================================================================
+// One-time migration of a v2 Sheet to v3. Non-destructive: only ADDS columns / rows / tabs.
+// Run once from the editor while nobody is using the app. Running it again changes nothing.
+// =====================================================================
+function addColumn_(sh, name, done) {
+  if (headerIndex_(sh, name)) return 0;
+  var c = Math.max(sh.getLastColumn(), 1) + 1;
+  sh.getRange(1, c).setNumberFormat('@');
+  sh.getRange(1, c).setValue(name);
+  done.push(sh.getName() + '.' + name + ' ditambah');
+  return c;
+}
+
+/** The v3 changes (also used by migrateV2). Returns nothing; pushes a description of each change into done. */
+function migrateV3Steps_(done) {
+  var ss = ss_();
+  var poles = ss.getSheetByName('Poles');
+  if (!poles) throw new Error('Tab Poles tiada. Untuk Sheet baru, jalankan setup().');
+  ['ActualDate', 'Active', 'PreviousIDs', 'StatusOverride', 'RINPegging', 'RINTrialPit', 'RINInstallation']
+    .forEach(function (h) { addColumn_(poles, h, done); });
+  var n = mapColumn_(poles, 'Active', function (v) { return v === '' ? 'TRUE' : v; });
+  if (n) done.push(n + ' tiang ditanda aktif');
+  // Actual completion date from the existing "Siap" time (only where still empty)
+  var last = poles.getLastRow();
+  if (last >= 2) {
+    var cDone = headerIndex_(poles, 'IsDone'), cAt = headerIndex_(poles, 'DoneAt'), cAct = headerIndex_(poles, 'ActualDate'), cCat = headerIndex_(poles, 'Category');
+    var vals = poles.getRange(2, 1, last - 1, poles.getLastColumn()).getValues();
+    var filled = 0;
+    vals.forEach(function (r, i) {
+      var at = r[cAt - 1] instanceof Date ? Utilities.formatDate(r[cAt - 1], TZ, 'yyyy-MM-dd') : str_(r[cAt - 1]).slice(0, 10);
+      if (SolarLogic.bool(r[cDone - 1]) && str_(r[cCat - 1]) === SolarLogic.CATEGORY.TODO && !str_(r[cAct - 1]) && SolarLogic.isIsoDate(at)) {
+        poles.getRange(i + 2, cAct).setNumberFormat('@');
+        poles.getRange(i + 2, cAct).setValue(at);
+        filled++;
+      }
+    });
+    if (filled) done.push(filled + ' tarikh siap sebenar diisi dari DoneAt');
+  }
+  // Roles tab with the same powers as before
+  var roles = ss.getSheetByName('Roles');
+  if (!roles) {
+    roles = ss.insertSheet('Roles');
+    roles.getRange(1, 1, 1, SCHEMA.Roles.length).setValues([SCHEMA.Roles]);
+    roles.setFrozenRows(1);
+    done.push('Tab Roles dicipta');
+  }
+  var have = {};
+  if (roles.getLastRow() >= 2) roles.getRange(2, 1, roles.getLastRow() - 1, 1).getValues().forEach(function (r) { have[str_(r[0]).trim().toUpperCase()] = true; });
+  var add = function (name, perms, builtIn) {
+    if (have[name.toUpperCase()]) return;
+    var r = roles.getLastRow() + 1;
+    roles.getRange(r, 1, 1, 4).setNumberFormat('@');
+    roles.getRange(r, 1, 1, 4).setValues([[name, perms, builtIn ? 'TRUE' : 'FALSE', 'TRUE']]);
+    have[name.toUpperCase()] = true;
+    done.push('Peranan ' + name);
+  };
+  SolarLogic.DEFAULT_ROLES.forEach(function (r) { add(r.RoleName, r.BuiltIn ? 'ALL' : r.Permissions.join(', '), r.BuiltIn); });
+  var users = ss.getSheetByName('Users');
+  if (users && users.getLastRow() >= 2) {
+    users.getRange(2, headerIndex_(users, 'Role'), users.getLastRow() - 1, 1).getValues().forEach(function (r) {
+      var name = str_(r[0]).trim();
+      if (name) add(name, '', false); // unknown role typed by hand: created with no permissions
+    });
+  }
+  // 20-character labels: shorten the v2 default name of C2 only if nobody changed it
+  var pt = ss.getSheetByName('PhotoTypes');
+  if (pt) {
+    var k = mapColumn_(pt, 'Name', function (v) { return v === SolarLogic.OLD_C2_NAME ? 'Siap pasang (siang)' : v; });
+    if (k) done.push('PhotoTypes C2: "' + SolarLogic.OLD_C2_NAME + '" → "Siap pasang (siang)"');
+  }
+}
+
+function migrateV3() {
+  var ss = ss_();
+  var ph = ss.getSheetByName('Photos');
+  if (ph && headerIndex_(ph, 'SlotID')) throw new Error('Sheet ini masih format v1. Jalankan migrateV2() dahulu.');
+  var done = [];
+  var settingsBefore = ss.getSheetByName('Settings') ? ss.getSheetByName('Settings').getLastRow() : 0;
+  migrateV3Steps_(done);
+  setup();
+  var settingsAfter = ss.getSheetByName('Settings').getLastRow();
+  if (settingsAfter > settingsBefore) done.push((settingsAfter - settingsBefore) + ' tetapan label ditambah');
+  var summary = done.length ? done.length + ' perubahan' : 'tiada perubahan (sudah dimigrasi)';
+  if (done.length) {
+    var me = { email: normEmail_(Session.getEffectiveUser().getEmail()) };
+    audit_(me, 'MigrationV3', 'Sheet', '', 'v2→v3', '', done.slice(0, 25).join('; '));
+  }
+  var msg = 'migrateV3 selesai: ' + summary + '.';
+  console.log(msg + (done.length ? '\n' + done.join('\n') : ''));
+  return msg;
+}
