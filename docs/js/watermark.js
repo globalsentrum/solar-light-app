@@ -10,6 +10,8 @@ var SolarWatermark = (function () {
   'use strict';
   var MAX_SIDE = 2048;   // default; the app passes the admin setting (o.maxSide)
   var THUMB_SIDE = 360;
+  var REPORT_SIDE = 1200;   // reduced copy inserted in the PDF / Word reports (sharp enough for the largest report cell)
+  var REPORT_QUALITY = 0.8;
   var QUALITY = 0.88;   // default; the app passes the admin setting (o.quality)
   var KL_OFFSET_MS = 8 * 3600 * 1000; // Malaysia: UTC+8, no daylight saving
 
@@ -157,9 +159,17 @@ var SolarWatermark = (function () {
           var t = document.createElement('canvas');
           t.width = Math.round(w * ts); t.height = Math.round(h * ts);
           t.getContext('2d').drawImage(c, 0, 0, t.width, t.height);
-          return Promise.all([toBlob(c, o.quality || QUALITY), toBlob(t, 0.7)]).then(function (b) {
+          var rs = Math.min(1, REPORT_SIDE / Math.max(w, h));
+          var rc = document.createElement('canvas');
+          rc.width = Math.round(w * rs); rc.height = Math.round(h * rs);
+          var rctx = rc.getContext('2d');
+          rctx.imageSmoothingQuality = 'high';
+          rctx.drawImage(c, 0, 0, rc.width, rc.height); // made from the watermarked photo: the stamp is in the report too
+          return Promise.all([toBlob(c, o.quality || QUALITY), toBlob(t, 0.7), toBlob(rc, REPORT_QUALITY)]).then(function (b) {
+            rc.width = rc.height = 0;
             c.width = c.height = 0; // free memory on iPhone
-            return { full: b[0], thumb: b[1], meta: meta, stamp: { lines: lines, box: box }, width: w, height: h };
+            return { full: b[0], thumb: b[1], report: b[2], meta: meta, stamp: { lines: lines, box: box }, width: w, height: h,
+              reportWidth: Math.round(w * rs), reportHeight: Math.round(h * rs) };
           });
         });
       });

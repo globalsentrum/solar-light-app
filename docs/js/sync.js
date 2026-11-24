@@ -58,7 +58,8 @@ var SolarSync = (function () {
     var p = item.payload;
     if (item.kind === 'photo') {
       return SolarAPI.call('uploadPhoto', Object.assign({}, p, {
-        imageB64: bufToB64(item.image), thumbB64: item.thumb ? bufToB64(item.thumb) : ''
+        imageB64: bufToB64(item.image), thumbB64: item.thumb ? bufToB64(item.thumb) : '',
+        reportB64: item.report ? bufToB64(item.report) : ''
       }), 180000);
     }
     if (item.kind === 'note') return SolarAPI.call('addNote', p, 60000);

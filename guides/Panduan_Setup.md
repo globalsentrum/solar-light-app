@@ -284,6 +284,7 @@ selepas digabungkan):
    - Tab **Poles**: lajur baru di hujung — `ActualDate`, `Active` (semua TRUE), `PreviousIDs`, `StatusOverride`, `RINPegging`, `RINTrialPit`, `RINInstallation`
    - Tab baru **Roles**: Admin (ALL), Team, Boss — kuasa sama seperti sebelum ini
    - Tab **Settings**: baris `Label.…` (label status & kad), `PhotoMaxSide` = 2048 dan `PhotoQuality` = 0.88 (kualiti gambar baru)
+   - Tab **Photos**: lajur baru `ThumbFileID`, `ReportFileID` di hujung (kosong untuk gambar lama)
    - Tab **AuditLog**: satu baris baru `MigrationV3`
    - Bilangan baris Photos, Notes, WorkPlan, Reports **sama** seperti dalam salinan anda
 4. Jalankan `migrateV3` sekali lagi → log mesti `tiada perubahan (sudah dimigrasi)`.

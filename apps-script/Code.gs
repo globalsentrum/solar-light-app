@@ -21,12 +21,14 @@
 var TZ = 'Asia/Kuala_Lumpur';
 var CHUNK_BYTES = 4 * 1024 * 1024;
 var MAX_IMAGE_BYTES = 15 * 1024 * 1024; // up to 3000 px at quality 0.95 (admin maximum)
+var REPORT_MAX_IMAGE_BYTES = 45 * 1024 * 1024; // all photos in one report together (Apps Script handles files up to ~50 MB)
 
 var SCHEMA = {
   Poles: ['PoleID', 'Bound', 'Chainage', 'ChainageExact', 'Category', 'PlannedDate', 'IsDone', 'DoneBy', 'DoneAt', 'UpdatedAt',
     'ActualDate', 'Active', 'PreviousIDs', 'StatusOverride', 'RINPegging', 'RINTrialPit', 'RINInstallation'],
   Roles: ['RoleName', 'Permissions', 'BuiltIn', 'Active'],
-  Photos: ['PhotoID', 'PoleID', 'PhotoTypeID', 'DriveFileID', 'FileURL', 'Source', 'CapturedAt', 'UploadedAt', 'Latitude', 'Longitude', 'AccuracyM', 'GPSAvailable', 'TakenBy', 'Hidden', 'RetakeFlag', 'ReportOrder', 'MeasurementM'],
+  Photos: ['PhotoID', 'PoleID', 'PhotoTypeID', 'DriveFileID', 'FileURL', 'Source', 'CapturedAt', 'UploadedAt', 'Latitude', 'Longitude', 'AccuracyM', 'GPSAvailable', 'TakenBy', 'Hidden', 'RetakeFlag', 'ReportOrder', 'MeasurementM',
+    'ThumbFileID', 'ReportFileID'],
   Activities: ['ActivityID', 'Name', 'Spec'],
   PhotoTypes: ['TypeID', 'ActivityID', 'Name'],
   WorkPlan: ['PlanID', 'Date', 'PoleID', 'Activity', 'CreatedBy', 'CreatedAt'],
@@ -482,20 +484,25 @@ ACTIONS.uploadPhoto = function (user, b) {
     var source = b.source === 'Gallery' ? 'Gallery' : 'Camera';
     var bytes = Utilities.base64Decode(str_(req_(b, 'imageB64')));
     if (bytes.length > MAX_IMAGE_BYTES) throw apiError_('BAD', 'Gambar terlalu besar.');
-    var stamp = Utilities.formatDate(new Date(), TZ, 'yyyyMMdd-HHmmss');
     var folder = poleFolder_(pole.PoleID);
-    var file = folder.createFile(Utilities.newBlob(bytes, 'image/jpeg',
-      pole.PoleID + '_' + typeId + '_' + stamp + '_' + photoId + '.jpg'));
+    var capturedAt = str_(b.capturedAt) || nowIso_();
+    var base = uniqueBase_(folder, photoBase_(pole.PoleID, typeId, capturedAt), []);
+    var file = folder.createFile(Utilities.newBlob(bytes, 'image/jpeg', base + '.jpg'));
+    var thumbId = '', reportId = '';
     if (b.thumbB64) {
-      folder.createFile(Utilities.newBlob(Utilities.base64Decode(str_(b.thumbB64)), 'image/jpeg', photoId + '_thumb.jpg'));
+      thumbId = folder.createFile(Utilities.newBlob(Utilities.base64Decode(str_(b.thumbB64)), 'image/jpeg', base + '_thumb.jpg')).getId();
+    }
+    if (b.reportB64) { // reduced copy made on the phone, used in the PDF / Word reports
+      reportId = folder.createFile(Utilities.newBlob(Utilities.base64Decode(str_(b.reportB64)), 'image/jpeg', base + '_report.jpg')).getId();
     }
     var gps = b.gpsAvailable === true && b.latitude !== '' && b.latitude !== null && b.latitude !== undefined;
     var row = appendObj_(photos, {
       PhotoID: photoId, PoleID: pole.PoleID, PhotoTypeID: typeId, DriveFileID: file.getId(), FileURL: file.getUrl(),
-      Source: source, CapturedAt: str_(b.capturedAt) || nowIso_(), UploadedAt: nowIso_(),
+      Source: source, CapturedAt: capturedAt, UploadedAt: nowIso_(),
       Latitude: gps ? Number(b.latitude).toFixed(6) : '', Longitude: gps ? Number(b.longitude).toFixed(6) : '',
       AccuracyM: gps && b.accuracy !== '' && b.accuracy != null ? Math.round(Number(b.accuracy)) : '',
-      GPSAvailable: gps, TakenBy: user.email, Hidden: false, RetakeFlag: false, ReportOrder: '', MeasurementM: measurement
+      GPSAvailable: gps, TakenBy: user.email, Hidden: false, RetakeFlag: false, ReportOrder: '', MeasurementM: measurement,
+      ThumbFileID: thumbId, ReportFileID: reportId
     });
     audit_(user, 'PhotoAdded', 'Photo', photoId, 'Pole/Type', '', pole.PoleID + '/' + typeId + ' (' + source + ')' +
       (measurement ? ' ' + measurement + 'm' : ''));
@@ -510,20 +517,17 @@ ACTIONS.getThumbs = function (user, b) {
   var isAdmin = SolarLogic.can(user.perms, 'hide_photo');
   var allowed = {};
   readTable_('Photos').rows.forEach(function (p) {
-    if (p.PoleID === poleId && (isAdmin || !SolarLogic.bool(p.Hidden))) allowed[p.PhotoID] = true;
+    if (SolarLogic.sameId(p.PoleID, poleId) && (isAdmin || !SolarLogic.bool(p.Hidden))) { allowed[p.PhotoID] = true; poleId = p.PoleID; }
   });
   var wanted = b.photoIds ? b.photoIds : null;
   var thumbs = {};
   if (!Object.keys(allowed).length) return { thumbs: thumbs };
   var folder = poleFolder_(poleId);
-  var it = folder.getFiles();
-  while (it.hasNext()) {
-    var f = it.next();
-    var m = f.getName().match(/^(.+)_thumb\.jpg$/);
-    if (m && allowed[m[1]] && (!wanted || wanted.indexOf(m[1]) >= 0)) {
-      thumbs[m[1]] = Utilities.base64Encode(f.getBlob().getBytes());
-    }
-  }
+  readTable_('Photos').rows.forEach(function (p) {
+    if (!allowed[p.PhotoID] || (wanted && wanted.indexOf(p.PhotoID) < 0)) return;
+    var f = thumbFile_(p, folder);
+    if (f) thumbs[p.PhotoID] = Utilities.base64Encode(f.getBlob().getBytes());
+  });
   return { thumbs: thumbs };
 };
 
@@ -695,13 +699,12 @@ function renamePole_(user, poles, pole, newId) {
       } else {
         f.setName(newId);
       }
-      var files = target.getFiles();
-      while (files.hasNext()) {
-        var file = files.next();
-        if (file.getName().indexOf(oldId + '_') === 0) file.setName(newId + file.getName().slice(oldId.length));
-      }
     }
   }
+  // v3 file names follow the new Pole ID; older files keep their names (they are never renamed)
+  readTable_('Photos').rows.forEach(function (ph) {
+    if (ph.PoleID === newId) renamePhotoFiles_(ph, newId, ph.PhotoTypeID);
+  });
   audit_(user, 'PoleRenamed', 'Pole', newId, 'PoleID', oldId, newId);
   audit_(user, 'PoleRenamed', 'Pole', newId, 'References', '', 'Photos ' + counts.Photos + ', Notes ' + counts.Notes +
     ', WorkPlan ' + counts.WorkPlan + ', Reports ' + counts.Reports);
@@ -1255,26 +1258,67 @@ function clearSelection_(user, photos, poleId, typeId) {
   return changed;
 }
 
-function thumbOf_(folder, photoId) {
-  var it = folder.getFilesByName(photoId + '_thumb.jpg');
+/** Name base of a new photo file: <PoleID>_<Activity>_<PhotoType>_<YYYY-MM-DD>_<HHMM> (current activity/type names). */
+function photoBase_(poleId, typeId, capturedAt) {
+  var t = SolarLogic.photoTypes(readTable_('PhotoTypes').rows).filter(function (x) { return x.TypeID === typeId; })[0];
+  var a = activitiesNow_().filter(function (x) { return t && x.ActivityID === t.ActivityID; })[0];
+  return SolarLogic.photoFileBase(poleId, a ? a.Name : '', t ? t.Name : typeId, capturedAt);
+}
+/** base, base_2, base_3 … — the first one not used by another file in the folder (ownIds = this photo's own files). */
+function uniqueBase_(folder, base, ownIds) {
+  var taken = function (b) {
+    return [b + '.jpg', b + '_thumb.jpg', b + '_report.jpg'].some(function (n) {
+      var it = folder.getFilesByName(n);
+      while (it.hasNext()) if (ownIds.indexOf(it.next().getId()) < 0) return true;
+      return false;
+    });
+  };
+  if (!taken(base)) return base;
+  for (var i = 2; i < 1000; i++) if (!taken(base + '_' + i)) return base + '_' + i;
+  throw apiError_('SERVER', 'Terlalu banyak fail dengan nama yang sama.');
+}
+function fileOrNull_(id) { try { return id ? DriveApp.getFileById(id) : null; } catch (e) { return null; } }
+/** Thumbnail: by its file ID (v3) or by the older name "<PhotoID>_thumb.jpg". */
+function thumbFile_(photo, folder) {
+  var f = fileOrNull_(str_(photo.ThumbFileID));
+  if (f) return f;
+  var it = (folder || poleFolder_(photo.PoleID)).getFilesByName(photo.PhotoID + '_thumb.jpg');
   return it.hasNext() ? it.next() : null;
 }
+function photoFiles_(photo) {
+  var folder = poleFolder_(photo.PoleID);
+  return { main: DriveApp.getFileById(photo.DriveFileID), thumb: thumbFile_(photo, folder), report: fileOrNull_(str_(photo.ReportFileID)) };
+}
 
-/** Move a photo's Drive file + thumbnail to another pole's folder and rename it. Returns an undo function. */
+/** Rename a v3-format photo (+ thumbnail + report copy) for its current pole / type. Older names untouched. Returns undo. */
+function renamePhotoFiles_(photo, poleId, typeId) {
+  var fs = photoFiles_(photo);
+  if (!SolarLogic.isNewPhotoFileName(fs.main.getName())) return function () {};
+  var own = [fs.main, fs.thumb, fs.report].filter(Boolean).map(function (f) { return f.getId(); });
+  var base = uniqueBase_(poleFolder_(poleId), photoBase_(poleId, typeId, photo.CapturedAt), own);
+  var undo = [];
+  [[fs.main, '.jpg'], [fs.thumb, '_thumb.jpg'], [fs.report, '_report.jpg']].forEach(function (x) {
+    if (!x[0]) return;
+    var old = x[0].getName();
+    if (old !== base + x[1]) { x[0].setName(base + x[1]); undo.push(function () { x[0].setName(old); }); }
+  });
+  return function () { undo.reverse().forEach(function (f) { try { f(); } catch (e) { /* best effort */ } }); };
+}
+
+/** Move a photo's files (photo, thumbnail, report copy) to another pole's folder; v3 names follow. Returns undo. */
 function moveDriveFiles_(photo, newPoleId, newTypeId) {
-  var file = DriveApp.getFileById(photo.DriveFileID);
+  var fs = photoFiles_(photo);
   var oldFolder = poleFolder_(photo.PoleID);
   var target = poleFolder_(newPoleId);
-  var thumb = thumbOf_(oldFolder, photo.PhotoID);
-  var oldName = file.getName();
-  var newName = oldName;
-  var m = oldName.match(/^(.*?)_([A-C]\d|S\d)_(.*)$/);
-  if (m && m[1] === photo.PoleID) newName = newPoleId + '_' + newTypeId + '_' + m[3];
   var done = [];
   try {
-    file.moveTo(target); done.push(function () { file.moveTo(oldFolder); });
-    if (newName !== oldName) { file.setName(newName); done.push(function () { file.setName(oldName); }); }
-    if (thumb) { thumb.moveTo(target); done.push(function () { thumb.moveTo(oldFolder); }); }
+    [fs.main, fs.thumb, fs.report].forEach(function (f) {
+      if (!f) return;
+      f.moveTo(target); done.push(function () { f.moveTo(oldFolder); });
+    });
+    var moved = { PhotoID: photo.PhotoID, PoleID: newPoleId, DriveFileID: photo.DriveFileID, ThumbFileID: fs.thumb ? fs.thumb.getId() : '',
+      ReportFileID: photo.ReportFileID, CapturedAt: photo.CapturedAt };
+    done.push(renamePhotoFiles_(moved, newPoleId, newTypeId));
   } catch (e) {
     done.reverse().forEach(function (f) { try { f(); } catch (x) { /* best effort */ } });
     throw e;
@@ -1291,7 +1335,8 @@ ACTIONS.deletePhoto = function (user, b) {
     if (!p) throw apiError_('NOTFOUND', 'Gambar tidak dijumpai.');
     var cleared = Number(p.ReportOrder) > 0 ? clearSelection_(user, photos, p.PoleID, p.PhotoTypeID) : [];
     try { DriveApp.getFileById(p.DriveFileID).setTrashed(true); } catch (e) { /* file already gone */ }
-    try { var th = thumbOf_(poleFolder_(p.PoleID), p.PhotoID); if (th) th.setTrashed(true); } catch (e2) { /* no thumb */ }
+    try { var th = thumbFile_(p); if (th) th.setTrashed(true); } catch (e2) { /* no thumb */ }
+    try { var rc = fileOrNull_(str_(p.ReportFileID)); if (rc) rc.setTrashed(true); } catch (e3) { /* no report copy */ }
     photos.sheet.deleteRow(p._row);
     audit_(user, 'PhotoDeleted', 'Photo', p.PhotoID, 'Pole/Type/DriveFileID', p.PoleID + '/' + p.PhotoTypeID + '/' + p.DriveFileID, '');
     return { deleted: p.PhotoID, photos: cleared };
@@ -1489,6 +1534,21 @@ function renderReport_(name, spec, photos) {
   var folder = DriveApp.getFolderById(settings_().ReportsFolderID);
   var byId = {};
   photos.forEach(function (p) { byId[p.PhotoID] = p; });
+  // Report copy (small, made on the phone) when there is one; older photos use the original (v2 size, ~0.3 MB).
+  var imageFile = {};
+  var total = 0;
+  spec.blocks.forEach(function (blk) {
+    blk.cells.forEach(function (x) {
+      if (!x.photoId || imageFile[x.photoId]) return;
+      var ph = byId[x.photoId];
+      var f = fileOrNull_(str_(ph.ReportFileID)) || DriveApp.getFileById(ph.DriveFileID);
+      imageFile[x.photoId] = f;
+      total += f.getSize();
+    });
+  });
+  if (total > REPORT_MAX_IMAGE_BYTES) {
+    throw apiError_('BAD', 'Laporan terlalu besar (' + Math.round(total / 1048576) + ' MB gambar). Pilih kurang tiang dan jana dalam beberapa laporan.');
+  }
   var doc = DocumentApp.create(name);
   var docFile = DriveApp.getFileById(doc.getId());
   try {
@@ -1522,13 +1582,16 @@ function renderReport_(name, spec, photos) {
       var grid = cell.appendTable(rows);
       grid.setBorderWidth(0);
       for (var c = 0; c < blk.columns; c++) grid.setColumnWidth(c, Math.floor((width - 12) / blk.columns));
+      // equal-sized cells: every photo row has the same height (photo box + caption)
+      for (var rr = 0; rr < rows.length; rr++) grid.getRow(rr).setMinimumHeight(blk.box.h + 34);
       blk.cells.forEach(function (x, idx) {
         var gc = grid.getRow(Math.floor(idx / blk.columns)).getCell(idx % blk.columns);
+        gc.setVerticalAlignment(DocumentApp.VerticalAlignment.CENTER);
         var p0 = gc.getChild(0).asParagraph();
         p0.setAlignment(CENTER);
         var photo = x.photoId ? byId[x.photoId] : null;
         if (photo) {
-          var img = p0.appendInlineImage(DriveApp.getFileById(photo.DriveFileID).getBlob());
+          var img = p0.appendInlineImage(imageFile[x.photoId].getBlob());
           var f = SolarLogic.fitBox(img.getWidth(), img.getHeight(), blk.box);
           img.setWidth(f.w).setHeight(f.h);
         } else {
@@ -1807,6 +1870,8 @@ function migrateV3Steps_(done) {
   if (!poles) throw new Error('Tab Poles tiada. Untuk Sheet baru, jalankan setup().');
   ['ActualDate', 'Active', 'PreviousIDs', 'StatusOverride', 'RINPegging', 'RINTrialPit', 'RINInstallation']
     .forEach(function (h) { addColumn_(poles, h, done); });
+  var photosSh = ss.getSheetByName('Photos');
+  if (photosSh) ['ThumbFileID', 'ReportFileID'].forEach(function (h) { addColumn_(photosSh, h, done); });
   var n = mapColumn_(poles, 'Active', function (v) { return v === '' ? 'TRUE' : v; });
   if (n) done.push(n + ' tiang ditanda aktif');
   // Actual completion date from the existing "Siap" time (only where still empty)

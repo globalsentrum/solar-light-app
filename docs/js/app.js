@@ -767,14 +767,14 @@
       return measP.then(function (measurement) {
         if (measurement === null) return null; // discarded by the user
         overlay('Menyimpan…');
-        return Promise.all([SolarSync.blobToBuf(res.full), SolarSync.blobToBuf(res.thumb)]).then(function (bufs) {
+        return Promise.all([SolarSync.blobToBuf(res.full), SolarSync.blobToBuf(res.thumb), SolarSync.blobToBuf(res.report)]).then(function (bufs) {
           var m = res.meta;
           return SolarSync.add({
             kind: 'photo',
             payload: { photoId: SolarSync.uid(), poleId: cap.poleId, typeId: cap.typeId, source: m.source, capturedAt: m.capturedAt,
               latitude: m.latitude, longitude: m.longitude, accuracy: m.accuracy, gpsAvailable: m.gpsAvailable,
               measurement: measurement === '' ? undefined : L.formatMeasurement(measurement) },
-            image: bufs[0], thumb: bufs[1]
+            image: bufs[0], thumb: bufs[1], report: bufs[2]
           }).then(function () { return m; });
         });
       });

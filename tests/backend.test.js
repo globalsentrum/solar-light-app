@@ -62,6 +62,12 @@ function reportDoc(rt, report, which) {
   return { file: f, doc: JSON.parse(txt.slice(txt.indexOf('\n') + 1)), magic: txt.slice(0, txt.indexOf('\n')) };
 }
 /** Flatten blocks: [{title, cells:[{img, caption}], extra:[texts]}] */
+/** Drive file name of a photo (what the report inserts when there is no report copy). */
+let currentRt = null;
+const fileNameOf = (photoId) => {
+  const p = currentRt.state.sheets.Photos.rowsAsObjects().find((x) => x.PhotoID === photoId);
+  return currentRt.state.files[p.DriveFileID].name;
+};
 function blocksOf(doc) {
   const out = [];
   let breaks = 0;
@@ -88,7 +94,7 @@ test('setup: tabs incl. Activities / PhotoTypes / WorkPlan, dummy poles with SSL
   rt.g.setup();
   ['Poles', 'Photos', 'Activities', 'PhotoTypes', 'WorkPlan', 'Notes', 'Users', 'AuditLog', 'Reports', 'Settings'].forEach((n) => assert.ok(rt.state.sheets[n], n));
   assert.ok(!rt.state.sheets.Slots, 'no Slots tab in v2');
-  assert.deepEqual(rt.state.sheets.Photos.data[0], ['PhotoID', 'PoleID', 'PhotoTypeID', 'DriveFileID', 'FileURL', 'Source', 'CapturedAt', 'UploadedAt', 'Latitude', 'Longitude', 'AccuracyM', 'GPSAvailable', 'TakenBy', 'Hidden', 'RetakeFlag', 'ReportOrder', 'MeasurementM']);
+  assert.deepEqual(rt.state.sheets.Photos.data[0], ['PhotoID', 'PoleID', 'PhotoTypeID', 'DriveFileID', 'FileURL', 'Source', 'CapturedAt', 'UploadedAt', 'Latitude', 'Longitude', 'AccuracyM', 'GPSAvailable', 'TakenBy', 'Hidden', 'RetakeFlag', 'ReportOrder', 'MeasurementM', 'ThumbFileID', 'ReportFileID']);
   assert.deepEqual(rt.state.sheets.WorkPlan.data[0], ['PlanID', 'Date', 'PoleID', 'Activity', 'CreatedBy', 'CreatedAt']);
   assert.deepEqual(rt.state.sheets.Reports.data[0], ['ReportID', 'PoleIDs', 'Activity', 'FileURL', 'DocxURL', 'CreatedBy', 'CreatedAt']);
   const poles = rows('Poles');
@@ -208,7 +214,7 @@ test('upload: photo types, measurement required + validated for B2-B4, idempoten
   // stored in Solar Photos/SSL040/ with the type in the file name
   const f = rt.state.files[rows('Photos')[0].DriveFileID];
   assert.equal(rt.state.folders[f.parent].name, 'SSL040');
-  assert.match(f.name, /^SSL040_B2_/);
+  assert.equal(f.name, 'SSL040_TrialPit_Lebar_2027-01-04_0915.jpg', 'v3 file name');
   // category rules unchanged
   assert.equal(upload(TEAM, 'SSL078', 'A1').code, 'FORBIDDEN', 'Tunggu kelulusan');
   assert.equal(upload(TEAM, 'SSL001', 'A1').ok, true, 'Sudah dipasang: optional photos');
@@ -358,6 +364,7 @@ test('reports: check lists missing poles; generate refuses incomplete poles; lim
 
 test('reports: PEGGING / TRIAL PIT / INSTALLATION layouts, PDF + Word in Solar Reports, selection used, download', () => {
   const { rt, admin, call, upload, fill, rows } = boot();
+  currentRt = rt;
   const ids = ['SSL050', 'SSL034', 'SSL040', 'SSL041'];
   const ph = {};
   ids.forEach((id) => { ph[id] = fill(id); });
@@ -383,7 +390,7 @@ test('reports: PEGGING / TRIAL PIT / INSTALLATION layouts, PDF + Word in Solar R
   assert.equal(blocks[0].border, 1);
   assert.equal(blocks[0].gridBorder, 0);
   assert.deepEqual(blocks[0].cells.map((c) => c.caption), ['SSL034', 'SSL040', 'SSL041', 'SSL050', '', '']);
-  assert.ok(blocks[0].cells[0].img.includes(ph.SSL034.A1[0]));
+  assert.ok(blocks[0].cells[0].img === fileNameOf(ph.SSL034.A1[0]));
   assert.deepEqual(blocks[0].extra, ['Total pegging : 4 nos']);
   assert.ok(blocks[0].cells.slice(0, 4).every((c) => c.w <= 160 && c.h <= 120 && c.align === 'CENTER'));
   assert.match(file.name, /^Laporan_PEGGING_\d{8}-\d{4}_SSL034-SSL050\.pdf$/);
@@ -402,7 +409,7 @@ test('reports: PEGGING / TRIAL PIT / INSTALLATION layouts, PDF + Word in Solar R
   assert.deepEqual(blocks.map((b) => b.pageBreaksBefore), [0, 0, 0, 1], '3 blocks per page');
   assert.deepEqual(blocks[0].cells.map((c) => c.caption), ['SSL034', 'WIDTH : 1.3M', 'LENGTH : 1.6M', 'DEPTH : 1.5M']);
   assert.deepEqual(blocks[1].cells.map((c) => c.caption), ['SSL040', 'WIDTH : 1.3M', 'LENGTH : 1.6M', 'DEPTH : 1.5M'], 'admin choice (old 1.3 m photo)');
-  assert.ok(blocks[1].cells[1].img.includes(ph.SSL040.B2[0]));
+  assert.ok(blocks[1].cells[1].img === fileNameOf(ph.SSL040.B2[0]));
   assert.ok(blocks[0].cells.every((c) => c.img && c.w <= 118 && c.h <= 157));
 
   // INSTALLATION
@@ -413,10 +420,10 @@ test('reports: PEGGING / TRIAL PIT / INSTALLATION layouts, PDF + Word in Solar R
   assert.deepEqual(blocks.map((b) => b.pageBreaksBefore), [0, 0, 1, 1], 'one pole per page');
   assert.deepEqual(blocks.map((b) => b.extra), [['SSL034'], ['SSL034'], ['SSL041'], ['SSL041']]);
   assert.equal(blocks[0].cells.length, 4);
-  order.forEach((id, k) => assert.ok(blocks[0].cells[k].img.includes(id), 'C1 in admin order ' + k));
+  order.forEach((id, k) => assert.ok(blocks[0].cells[k].img === fileNameOf(id), 'C1 in admin order ' + k));
   assert.deepEqual([blocks[0].cells[0].w, blocks[0].cells[0].h], [118, 157], 'portrait fits the cell');
   assert.deepEqual([blocks[0].cells[1].w, blocks[0].cells[1].h], [118, 89], 'landscape keeps aspect ratio');
-  assert.ok(blocks[1].cells[0].img.includes(ph.SSL034.C2[0]) && blocks[1].cells[1].img.includes(ph.SSL034.C3[0]));
+  assert.ok(blocks[1].cells[0].img === fileNameOf(ph.SSL034.C2[0]) && blocks[1].cells[1].img === fileNameOf(ph.SSL034.C3[0]));
   assert.ok(blocks[1].cells[0].w > blocks[0].cells[1].w, 'completed photos larger');
   assert.ok(!JSON.stringify(blocks).includes('Package 2A'), 'no form headers');
 
@@ -483,7 +490,7 @@ test('migrateV2: renames IDs in every sheet + Drive, maps old slots, adds new ta
   assert.match(msg, /perubahan/);
   assert.deepEqual(rows('Poles').map((p) => p.PoleID), ['SSL001', 'SSL002', 'SSL003']);
   const photos = rows('Photos');
-  assert.deepEqual(rt.state.sheets.Photos.data[0], ['PhotoID', 'PoleID', 'PhotoTypeID', 'DriveFileID', 'FileURL', 'Source', 'CapturedAt', 'UploadedAt', 'Latitude', 'Longitude', 'AccuracyM', 'GPSAvailable', 'TakenBy', 'Hidden', 'RetakeFlag', 'ReportOrder', 'MeasurementM']);
+  assert.deepEqual(rt.state.sheets.Photos.data[0], ['PhotoID', 'PoleID', 'PhotoTypeID', 'DriveFileID', 'FileURL', 'Source', 'CapturedAt', 'UploadedAt', 'Latitude', 'Longitude', 'AccuracyM', 'GPSAvailable', 'TakenBy', 'Hidden', 'RetakeFlag', 'ReportOrder', 'MeasurementM', 'ThumbFileID', 'ReportFileID']);
   assert.deepEqual(photos.map((p) => p.PoleID + '/' + p.PhotoTypeID), ['SSL002/A1', 'SSL002/B2', 'SSL002/C1', 'SSL002/C1', 'SSL002/C3']);
   assert.ok(photos.every((p) => p.ReportOrder === '' && p.MeasurementM === ''));
   assert.equal(rows('Notes')[0].PoleID, 'SSL002');

@@ -442,7 +442,8 @@ async function processSize(page, kind, maxSide, quality) {
     const res = await SolarWatermark.process(new File([window.__testPhoto[kind]], 'p.jpg', { type: 'image/jpeg' }), {
       source: 'Camera', now: new Date('2027-01-05T06:05:00Z'), maxSide, quality, getDeviceGps: async () => ({ lat: 3.1, lng: 101.6, acc: 5 }) });
     const b64 = await new Promise((r) => { const fr = new FileReader(); fr.onload = () => r(fr.result.split(',')[1].length); fr.readAsDataURL(res.full); });
-    return { w: res.width, h: res.height, bytes: res.full.size, b64, thumb: res.thumb.size, box: res.stamp.box };
+    return { w: res.width, h: res.height, bytes: res.full.size, b64, thumb: res.thumb.size, box: res.stamp.box,
+      report: res.report.size, rw: res.reportWidth, rh: res.reportHeight };
   }, { kind, maxSide, quality });
 }
 
@@ -460,7 +461,7 @@ test('photo quality: 12 MP photo -> 2048 px / 0.88 by default; upload sizes meas
   const worst = await processSize(page, 'noise', 3000, 0.95);
   const kb = (n) => Math.round(n / 1024) + ' KB';
   const table = { 'v2 (1600 / 0.8)': oldV2, 'v3 default (2048 / 0.88)': def, 'minimum (1280 / 0.6)': min, 'maximum (3000 / 0.95)': max, 'worst case noise (3000 / 0.95)': worst };
-  fs.writeFileSync(path.join(OUT, 'photo-sizes.json'), JSON.stringify(Object.fromEntries(Object.entries(table).map(([k, v]) => [k, { size: v.w + 'x' + v.h, jpeg: kb(v.bytes), upload_base64: kb(v.b64) }])), null, 1));
+  fs.writeFileSync(path.join(OUT, 'photo-sizes.json'), JSON.stringify(Object.fromEntries(Object.entries(table).map(([k, v]) => [k, { size: v.w + 'x' + v.h, jpeg: kb(v.bytes), upload_base64: kb(v.b64), report_copy: kb(v.report) }])), null, 1));
   assert.deepEqual([def.w, def.h], [2048, 1536]);
   assert.deepEqual([max.w, max.h], [3000, 2250]);
   assert.deepEqual([min.w, min.h], [1280, 960]);
@@ -468,6 +469,10 @@ test('photo quality: 12 MP photo -> 2048 px / 0.88 by default; upload sizes meas
   assert.ok(def.bytes < 2.5 * 1024 * 1024, 'default photo < 2.5 MB: ' + kb(def.bytes));
   assert.ok(worst.bytes < 15 * 1024 * 1024, 'even the worst case at the maximum setting fits the 15 MB server limit: ' + kb(worst.bytes));
   assert.ok(def.thumb < 40000 && max.thumb < 40000, 'thumbnail size unchanged');
+  // report copy: 1200 px whatever the photo setting, small enough for 60 photos per report
+  for (const r of [def, max, min]) assert.equal(Math.max(r.rw, r.rh), 1200);
+  assert.ok(def.report < 400 * 1024 && max.report < 400 * 1024, 'report copy < 400 KB: ' + kb(def.report) + ' / ' + kb(max.report));
+  assert.ok(60 * def.report < 45 * 1024 * 1024, '60 report copies fit the 45 MB report limit');
   // watermark text scales with the photo: same share of the long side at every size
   const share = (r) => r.box.h / Math.max(r.w, r.h);
   assert.ok(Math.abs(share(def) - share(oldV2)) < 0.004 && Math.abs(share(max) - share(oldV2)) < 0.004, [share(oldV2), share(def), share(max)].join(' / '));
@@ -529,6 +534,8 @@ test('photo quality setting: admin edits in Settings (range enforced); new photo
     assert.equal(await page.textContent('#syncBtn'), '⏳ 2 item menunggu line');
     const queued = await page.evaluate(async () => (await SolarDB.queueAll()).map((i) => i.image.byteLength));
     assert.equal(queued.length, 2);
+    assert.deepEqual(await page.evaluate(async () => (await SolarDB.queueAll()).map((i) => !!(i.report && i.report.byteLength && i.thumb.byteLength))), [true, true],
+      'report copy + thumbnail queued with each photo');
     await page.reload();
     await page.waitForSelector('.act');
     assert.equal(await page.textContent('#syncBtn'), '⏳ 2 item menunggu line');
@@ -544,6 +551,15 @@ test('photo quality setting: admin edits in Settings (range enforced); new photo
     const sizes = newOnes.map((p) => srv.rt.state.files[p.DriveFileID].buf.length);
     assert.deepEqual(sizes.slice().sort(), queued.slice().sort(), 'uploaded bytes = queued bytes');
     assert.deepEqual(fileDims(first), { w: 2048, h: 1536 }, 'existing photo unchanged');
+    // file names + report copies uploaded
+    newOnes.forEach((p) => {
+      const main = srv.rt.state.files[p.DriveFileID].name;
+      assert.match(main, /^SSL035_Installation_ProgressPemasangan_\d{4}-\d{2}-\d{2}_\d{4}(_2)?\.jpg$/);
+      assert.equal(srv.rt.state.files[p.ThumbFileID].name, main.replace('.jpg', '_thumb.jpg'));
+      assert.equal(srv.rt.state.files[p.ReportFileID].name, main.replace('.jpg', '_report.jpg'));
+      assert.deepEqual(jpegSize(srv.rt.state.files[p.ReportFileID].buf), { w: 1200, h: 900 });
+    });
+    assert.notEqual(srv.rt.state.files[newOnes[0].DriveFileID].name, srv.rt.state.files[newOnes[1].DriveFileID].name, 'same minute -> _2');
     // Team cannot see / change it
     const r = JSON.parse(JSON.stringify(srv.rt.g.handle_({ action: 'savePhotoSettings', token: srv.rt.g.issueSession_('team@example.com'), maxSide: 3000, quality: 0.95 })));
     assert.equal(r.code, 'FORBIDDEN');

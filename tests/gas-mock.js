@@ -107,6 +107,7 @@ function createRuntime(opts) {
     getUrl() { return 'https://drive.google.com/file/d/' + this.id + '/view'; }
     getBlob() { return new Blob(this.buf, this.mime, this.name); }
     setName(n) { this.name = n; return this; }
+    getSize() { return this.buf.length; }
     setTrashed(t) { this.trashed = !!t; return this; }
     moveTo(folder) {
       if (state.failMoveAfter !== undefined && state.failMoveAfter !== null) {
@@ -201,7 +202,11 @@ function createRuntime(opts) {
       setBorderWidth(w) { n.border = w; return tbl; },
       setColumnWidth(i, w) { (n.colWidths = n.colWidths || [])[i] = w; return tbl; },
       getNumRows: () => n.rows.length,
-      getRow: (ri) => strict({ getCell: (ci) => wrapContainer(n.rows[ri][ci], 'TableCell') }, 'TableRow'),
+      getRow: (ri) => {
+        const row = strict({ getCell: (ci) => wrapContainer(n.rows[ri][ci], 'TableCell'),
+          setMinimumHeight: (h) => { (n.minHeights = n.minHeights || [])[ri] = h; return row; } }, 'TableRow');
+        return row;
+      },
     }, 'Table');
     return tbl;
   }
@@ -220,6 +225,7 @@ function createRuntime(opts) {
     };
     if (kind === 'TableCell') {
       api.setBackgroundColor = (c) => { holder.bg = c; return wrapContainer(holder, kind); };
+      api.setVerticalAlignment = (v) => { holder.valign = v; return wrapContainer(holder, kind); };
     } else {
       const self = () => body;
       api.appendPageBreak = () => { ch.push({ type: 'pagebreak' }); return strict({}, 'PageBreak'); };
@@ -233,6 +239,7 @@ function createRuntime(opts) {
   const DocumentApp = {
     ParagraphHeading: { HEADING1: 'H1', HEADING2: 'H2', HEADING3: 'H3' },
     HorizontalAlignment: { LEFT: 'LEFT', CENTER: 'CENTER', RIGHT: 'RIGHT' },
+    VerticalAlignment: { TOP: 'TOP', CENTER: 'CENTER', BOTTOM: 'BOTTOM' },
     create(name) {
       const id = nextId('F');
       state.files[id] = new File(id, name, 'application/vnd.google-apps.document', Buffer.alloc(0), 'ROOT');

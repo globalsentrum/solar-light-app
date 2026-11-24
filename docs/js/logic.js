@@ -453,6 +453,27 @@ var SolarLogic = (function () {
     return { maxSide: m.ok ? m.maxSide : PHOTO_DEFAULTS.maxSide, quality: q.ok ? q.quality : PHOTO_DEFAULTS.quality };
   }
 
+  // ---------- Drive file names for NEW photos ----------
+  /** "Trial Pit" -> "TrialPit", "Siap pasang (siang)" -> "SiapPasangSiang", "Lebar" -> "Lebar" */
+  function nameToken(s) {
+    return String(s == null ? '' : s).split(/[^A-Za-z0-9]+/).filter(Boolean)
+      .map(function (w) { return w.charAt(0).toUpperCase() + w.slice(1); }).join('') || 'X';
+  }
+  /** Pole ID for a file name: letters/digits kept, anything else -> "-" ("TEMP 01" -> "TEMP-01"). */
+  function poleToken(id) {
+    return String(id == null ? '' : id).trim().replace(/[^A-Za-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'X';
+  }
+  /** <PoleID>_<Activity>_<PhotoType>_<YYYY-MM-DD>_<HHMM>  (time = photo capture time, Malaysia) */
+  function photoFileBase(poleId, activityName, typeName, capturedAt) {
+    var m = String(capturedAt || '').match(/^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2})/);
+    var d = m ? m[1] + '_' + m[2] + m[3] : '0000-00-00_0000';
+    return poleToken(poleId) + '_' + nameToken(activityName) + '_' + nameToken(typeName) + '_' + d;
+  }
+  /** Is this a v3 photo file name (photo, thumbnail or report copy)? Older names are never renamed. */
+  function isNewPhotoFileName(name) {
+    return /^[A-Za-z0-9-]+_[A-Za-z0-9]+_[A-Za-z0-9]+_\d{4}-\d{2}-\d{2}_\d{4}(_\d+)?(_thumb|_report)?\.jpg$/.test(String(name || ''));
+  }
+
   // ---------- labels ----------
   /** Settings rows/object -> {key: label}; values over 20 chars or empty fall back to the default. */
   function labels(settings) {
@@ -585,6 +606,7 @@ var SolarLogic = (function () {
     needsNightPhoto: needsNightPhoto, typeReportState: typeReportState, poleReportStatus: poleReportStatus, hasRin: hasRin,
     matchesFilter: matchesFilter, labels: labels, validateLabel: validateLabel, nextPlanDate: nextPlanDate,
     validateImport: validateImport, parsePermissions: parsePermissions,
+    nameToken: nameToken, poleToken: poleToken, photoFileBase: photoFileBase, isNewPhotoFileName: isNewPhotoFileName,
     PHOTO_DEFAULTS: PHOTO_DEFAULTS, PHOTO_LIMITS: PHOTO_LIMITS, validatePhotoSettings: validatePhotoSettings, photoSettings: photoSettings, poleIdFromLegacy: poleIdFromLegacy, poleMatchesQuery: poleMatchesQuery,
     isChainageExact: isChainageExact, categoryFromWorkArea: categoryFromWorkArea, chainageSortKey: chainageSortKey,
     activities: activities, photoTypes: photoTypes, typeById: typeById, typesOfActivity: typesOfActivity,

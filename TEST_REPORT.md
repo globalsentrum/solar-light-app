@@ -1,6 +1,6 @@
 # Laporan Ujian — Aplikasi Lampu Solar Karak (versi 3)
 
-Tarikh: 24/11/2026 · Keputusan: **90 / 90 lulus**: 26 logik + 16 backend v2 (regresi) + 23 backend v3 + 14 pelayar v2 (regresi) + 12 pelayar v3
+Tarikh: 24/11/2026 · Keputusan: **96 / 96 lulus**: 26 logik + 16 backend v2 (regresi) + 28 backend v3 + 14 pelayar v2 (regresi) + 12 pelayar v3
 Jalankan semula: `npm install` → `npm run test:all`. Ujian menggunakan **data tiang dummy** (123 tiang, jumlah sama, chainage rekaan).
 
 | Bahagian | Cara ujian |
@@ -73,6 +73,9 @@ Gunakan senarai semak telefon di bawah.
 | maksimum (3000 / 0.95) | 3000×2250 | 2630 KB | 3506 KB |
 | kes terburuk (hingar penuh, 3000 / 0.95) | 3000×2250 | 5759 KB | 7679 KB |
 
+Salinan laporan (1200 px, kualiti 0.8, dibuat di telefon daripada gambar bertanda air): **≈ 165–290 KB**, apa jua tetapan gambar.
+60 gambar dalam satu laporan ≈ 11 MB (had keselamatan 45 MB).
+
 - Had muat naik pelayan dinaikkan 8 → 15 MB (kes terburuk pada tetapan maksimum muat); 12 MB diterima, 16 MB ditolak.
 - Teks watermark ikut skala: tinggi kotak = bahagian yang sama daripada sisi panjang pada 1600, 2048 dan 3000 px.
 - Thumbnail tidak berubah (< 40 KB). Gambar kecil tidak dibesarkan.
@@ -81,12 +84,30 @@ Gunakan senarai semak telefon di bawah.
 - **Luar talian**: tetapan 2600 / 0.9 → 2 gambar 12 MP dalam barisan semasa offline → muat semula aplikasi → online dengan
   satu jawapan hilang → tepat 2 gambar, 2600×1950, bait di pelayan = bait dalam barisan; gambar lama kekal 2048×1536.
 
+**Salinan laporan & nama fail (tambahan v3)**
+- Nama fail baru: `SSL034_TrialPit_Lebar_2026-11-24_1032.jpg`; masa = masa gambar diambil; `_2`, `_3` jika nama sudah wujud;
+  thumbnail `…_thumb.jpg`, salinan laporan `…_report.jpg`; nama aktiviti/jenis terkini (tanpa ruang/simbol); ID sementara
+  `TEMP 01` → `TEMP-01`; ulang hantar tidak mencipta fail lagi. Folder setiap tiang kekal.
+- Pindah / tukar jenis / tukar 2 tiang / tukar ID tiang → nama baru mengikut (gambar, thumbnail, salinan laporan); nama unik.
+- **Fail lama (v2) tidak pernah ditukar nama** — diuji pada data yang dibuat oleh kod v2 sebenar: pindah, tukar dan tukar ID tiang;
+  fail dipindah ke folder yang betul, nama kekal; thumbnail lama masih dijumpai.
+- Padam gambar: gambar, thumbnail dan salinan laporan ke Trash.
+- Laporan: salinan laporan digunakan; gambar lama tanpa salinan → gambar asal (saiz v2 ≈ 0.3 MB); jumlah gambar > 45 MB → ditolak
+  dengan mesej jelas (tiada laporan dicipta); 40 MB diterima.
+- **10 tiang bagi setiap aktiviti** (gambar potret & landskap bercampur): setiap gambar dalam laporan ialah salinan laporan;
+  lajur sama lebar; setiap baris tinggi minimum yang sama; gambar di tengah (mendatar & menegak); nisbah gambar dikekalkan
+  (tidak dipotong / diregang) dan muat tepat pada satu sisi kotak. Pratonton: Pegging 1 halaman, Trial Pit 4, Installation 10.
+- Telefon: salinan laporan dan thumbnail disimpan bersama gambar dalam barisan luar talian dan dimuat naik selepas sambung semula.
+- `migrateV3` menambah lajur Photos `ThumbFileID`, `ReportFileID` (kosong untuk gambar lama); nilai lama tidak berubah.
+
 ## Pepijat ditemui & dibaiki semasa ujian v3
 1. Muat naik/nota ulangan dengan ID sedia ada tidak menyemak kebenaran dahulu → dibaiki.
 2. Bar pilihan di Jadual terlebih lebar (butang terkeluar skrin) → dibaiki, kini diuji pada 360 px.
 3. Label panjang terpotong ("…") dalam lencana → kini dibalut ke baris kedua; ujian mengesan teks terpotong.
 4. Kotak jenis gambar menjadi lebih tinggi bila ada banyak gambar (nota "perlu pilih") → kepala kotak tinggi tetap.
 5. Ralat yang sudah dipaparkan kepada pengguna dilaporkan semula sebagai ralat pelayar → dibaiki.
+6. Ruang medan tetapan kualiti gambar: pelayar menghalang hantar tanpa mesej BM → kini mesej BM yang jelas.
+7. Pratonton laporan: kapsyen bertindih dengan bahagian bawah gambar potret → tinggi baris dinaikkan (kotak + 34 pt).
 
 ## Senarai semak telefon sebenar (selepas kemas kini v3)
 - [ ] `migrateV3` → "selesai"; kali kedua → "tiada perubahan"; bilangan baris Photos/Notes/WorkPlan/Reports sama dengan salinan
@@ -110,3 +131,6 @@ Gunakan senarai semak telefon di bawah.
 - [ ] Kualiti gambar: ambil gambar baru → buka fail dalam Drive → 2048 px sisi panjang, teks watermark jelas; masa muat naik
       dengan data mudah alih biasa boleh diterima; iPhone lama tidak tergantung semasa memproses
 - [ ] Tukar ke 3000 / 0.95 → ambil satu gambar → semak saiz fail; tukar balik ke 2048 / 0.88
+- [ ] Drive: gambar baru bernama `SSL0xx_Aktiviti_Jenis_YYYY-MM-DD_HHMM.jpg` + `_thumb` + `_report`; gambar lama tidak bertukar nama
+- [ ] Jana laporan **10 tiang** bagi setiap aktiviti (potret & landskap bercampur) → semak PDF dan Word: kotak sama saiz,
+      gambar di tengah, tidak dipotong, kapsyen tidak bertindih; saiz fail munasabah

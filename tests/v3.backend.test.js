@@ -29,9 +29,15 @@ function boot(opts) {
     measurement: ['B2', 'B3', 'B4'].includes(typeId) ? '1.4' : undefined, ...(extra || {}),
   });
   const up = (poleId, typeId, extra) => { const r = upload(ADMIN, poleId, typeId, extra); assert.equal(r.ok, true, r.error); return r.photo.PhotoID; };
+  /** Drive names of a photo's files: main / thumbnail / report copy */
+  const namesOf = (photoId) => {
+    const p = rt.state.sheets.Photos.rowsAsObjects().find((x) => x.PhotoID === photoId);
+    const n = (id) => (id && rt.state.files[id] ? rt.state.files[id].name : '');
+    return { main: n(p.DriveFileID), thumb: n(p.ThumbFileID), report: n(p.ReportFileID), folder: rt.state.folders[rt.state.files[p.DriveFileID].parent].name };
+  };
   const folderOf = (name) => Object.values(rt.state.folders).find((f) => f.name === name && !f.trashed);
   const filesIn = (name) => { const f = folderOf(name); return f ? Object.values(rt.state.files).filter((x) => x.parent === f.id && !x.trashed).map((x) => x.name).sort() : []; };
-  return { rt, tok, call, admin, rows, upload, up, folderOf, filesIn };
+  return { rt, tok, call, admin, rows, upload, up, folderOf, filesIn, namesOf };
 }
 /** Sheets (except the log) + Drive. Empty folders are ignored: a failed move may leave the (empty) target pole folder. */
 const snapshot = (rt) => JSON.stringify({
@@ -190,7 +196,7 @@ test('Admin role cannot be reduced by editing the Roles sheet by hand; last acti
 
 // ------------------------------------------------------------------ poles
 test('pole ID rename: duplicates blocked (case/space), temporary ID, every reference + Drive folder updated, old ID still works', () => {
-  const { admin, call, rows, up, folderOf, filesIn, rt } = boot();
+  const { admin, call, rows, up, folderOf, filesIn, rt, namesOf } = boot();
   const a1 = up('SSL034', 'A1');
   const b2 = up('SSL034', 'B2');
   admin('setReportSelection', { poleId: 'SSL034', typeId: 'A1', photoIds: [a1] });
@@ -216,8 +222,9 @@ test('pole ID rename: duplicates blocked (case/space), temporary ID, every refer
   assert.deepEqual(rows('WorkPlan').map((p) => p.PoleID).sort(), ['SSL035', 'SSL999']);
   assert.ok(rows('Reports').every((x) => x.PoleIDs === 'SSL999'));
   assert.ok(folderOf('SSL999') && !folderOf('SSL034'), 'Drive folder renamed');
-  assert.ok(filesIn('SSL999').some((f) => f.startsWith('SSL999_A1_')), 'file names follow');
-  assert.ok(filesIn('SSL999').includes(b2 + '_thumb.jpg'));
+  assert.match(namesOf(a1).main, /^SSL999_Pegging_Pegging_\d{4}-\d{2}-\d{2}_\d{4}\.jpg$/, 'v3 file names follow the new ID');
+  assert.equal(namesOf(b2).thumb, namesOf(b2).main.replace('.jpg', '_thumb.jpg'), 'thumbnail follows');
+  assert.equal(namesOf(b2).folder, 'SSL999');
   const log = rows('AuditLog').filter((x) => x.Action === 'PoleRenamed');
   assert.equal(log[0].OldValue, 'SSL034');
   assert.equal(log[0].NewValue, 'SSL999');
@@ -351,7 +358,7 @@ test('delete photo: row removed, photo + thumbnail moved to Drive Trash (not del
   assert.ok(!rows('Photos').some((p) => p.PhotoID === b));
   assert.equal(Object.keys(rt.state.files).length, filesBefore, 'files still exist (Trash)');
   assert.equal(rt.state.files[row.DriveFileID].trashed, true);
-  assert.equal(Object.values(rt.state.files).find((f) => f.name === b + '_thumb.jpg').trashed, true);
+  assert.equal(rt.state.files[row.ThumbFileID].trashed, true, 'thumbnail in Trash');
   assert.ok(rows('Photos').filter((p) => p.PhotoTypeID === 'C1').every((p) => p.ReportOrder === ''), 'selection cleared');
   const log = rows('AuditLog').filter((x) => x.Action === 'PhotoDeleted')[0];
   assert.equal(log.OldValue, 'SSL034/C1/' + row.DriveFileID);
@@ -376,7 +383,7 @@ test('hide clears the selection of that type; edit measurement validated + logge
 });
 
 test('move photos to another pole: added to target, optional type change, measurements move, Drive files move, selection cleared', () => {
-  const { admin, rows, up, filesIn } = boot();
+  const { admin, rows, up, filesIn, namesOf } = boot();
   const t1 = up('SSL035', 'B2', { measurement: '1.1' });
   const m1 = up('SSL034', 'B2', { measurement: '1.7' });
   const m2 = up('SSL034', 'B3', { measurement: '1.9' });
@@ -389,14 +396,16 @@ test('move photos to another pole: added to target, optional type change, measur
     ['SSL035/B2/1.7', 'SSL035/B3/1.9', 'SSL035/B2/1.1'], 'target keeps its photo; measurements moved');
   assert.ok(ph.filter((p) => p.PoleID === 'SSL034' && p.PhotoTypeID === 'B2').every((p) => p.ReportOrder === ''), 'source selection cleared');
   assert.equal(ph.find((p) => p.PhotoID === m1).ReportOrder, '');
-  assert.ok(filesIn('SSL035').some((f) => f.startsWith('SSL035_B2_') && f.includes(m1)));
-  assert.ok(filesIn('SSL035').includes(m1 + '_thumb.jpg'));
-  assert.ok(!filesIn('SSL034').some((f) => f.includes(m1)));
+  assert.match(namesOf(m1).main, /^SSL035_TrialPit_Lebar_/, 'v3 name follows the new pole');
+  assert.equal(namesOf(m1).folder, 'SSL035');
+  assert.equal(namesOf(m1).thumb, namesOf(m1).main.replace('.jpg', '_thumb.jpg'));
+  assert.ok(!filesIn('SSL034').includes(namesOf(m1).main));
+  assert.notEqual(namesOf(m1).main, namesOf(t1).main, 'same pole/type/minute -> unique name');
   // with a type change (saved under the wrong type)
   r = admin('movePhotos', { photoIds: [m2], targetPoleId: 'SSL035', typeId: 'B4' });
   assert.equal(rows('Photos').find((p) => p.PhotoID === m2).PhotoTypeID, 'B4');
   assert.equal(rows('Photos').find((p) => p.PhotoID === m2).MeasurementM, '1.9');
-  assert.ok(filesIn('SSL035').some((f) => f.startsWith('SSL035_B4_') && f.includes(m2)));
+  assert.match(namesOf(m2).main, /^SSL035_TrialPit_Dalam_/, 'type change -> new name');
   assert.match(admin('movePhotos', { photoIds: [m2], targetPoleId: 'SSL035' }).error, /sudah berada/);
   assert.equal(admin('movePhotos', { photoIds: [m2], targetPoleId: 'NOPE' }).code, 'NOTFOUND');
   assert.deepEqual(rows('AuditLog').filter((a) => a.Action === 'PhotoMoved').map((a) => a.OldValue + '>' + a.NewValue),
@@ -415,7 +424,7 @@ test('move photos: Drive failure half-way -> nothing changed (rollback)', () => 
 });
 
 test('swap photos between 2 poles: all, one activity, selections follow, rollback on failure', () => {
-  const { admin, rows, up, rt, filesIn } = boot();
+  const { admin, rows, up, rt, filesIn, namesOf } = boot();
   const A = { A1: up('SSL034', 'A1'), B1: up('SSL034', 'B1'), C2: up('SSL034', 'C2') };
   const extra = up('SSL034', 'A1');
   const B = { A1: up('SSL035', 'A1'), C3: up('SSL035', 'C3') };
@@ -428,7 +437,8 @@ test('swap photos between 2 poles: all, one activity, selections follow, rollbac
   assert.equal(rows('Photos').find((p) => p.PhotoID === extra).ReportOrder, '1', 'selection follows the photo');
   const L2 = admin('bootstrap');
   assert.deepEqual(L.reportPhotos('SSL035', 'A1', L2.photos).map((p) => p.PhotoID), [extra]);
-  assert.ok(filesIn('SSL035').some((f) => f.includes(A.A1)));
+  assert.equal(namesOf(A.A1).folder, 'SSL035');
+  assert.match(namesOf(A.A1).main, /^SSL035_Pegging_Pegging_/);
   // all activities
   r = admin('swapPhotos', { poleA: 'SSL034', poleB: 'SSL035' });
   assert.deepEqual([pole(A.A1), pole(A.B1), pole(A.C2), pole(B.A1), pole(B.C3)], ['SSL034', 'SSL035', 'SSL035', 'SSL035', 'SSL034']);
@@ -642,4 +652,156 @@ test('migrateV3 adds PhotoMaxSide / PhotoQuality to a v2 sheet (defaults), secon
   assert.equal(s.find((x) => x.Key === 'PhotoMaxSide').Value, '2048');
   assert.equal(s.find((x) => x.Key === 'PhotoQuality').Value, '0.88');
   assert.match(v3.g.migrateV3(), /tiada perubahan/);
+});
+
+// ------------------------------------------------------------------ file names + report copies (v3 addition)
+const PORTRAIT = fs.readFileSync(path.join(__dirname, 'fixtures/gallery_noexif.jpg')).toString('base64'); // 1500x2000
+const LANDSCAPE = IMG; // 2400x1800
+const REPORT_COPY = THUMB; // stands in for the small copy made on the phone
+
+test('new photo files: <PoleID>_<Activity>_<PhotoType>_<YYYY-MM-DD>_<HHMM>.jpg, _2/_3 when taken, thumbnail + report copy suffixes', () => {
+  const { call, rows, rt, namesOf } = boot();
+  const upload = (id, typeId, extra) => call(TEAM, 'uploadPhoto', { photoId: id, poleId: 'SSL034', typeId, imageB64: IMG, thumbB64: THUMB, reportB64: REPORT_COPY,
+    source: 'Camera', capturedAt: '2026-11-24T10:32:15+08:00', gpsAvailable: false, measurement: '1.3', ...(extra || {}) });
+  ['nm_0000001', 'nm_0000002', 'nm_0000003'].forEach((id) => assert.equal(upload(id, 'B2').ok, true));
+  assert.deepEqual(['nm_0000001', 'nm_0000002', 'nm_0000003'].map((id) => namesOf(id).main),
+    ['SSL034_TrialPit_Lebar_2026-11-24_1032.jpg', 'SSL034_TrialPit_Lebar_2026-11-24_1032_2.jpg', 'SSL034_TrialPit_Lebar_2026-11-24_1032_3.jpg']);
+  const n = namesOf('nm_0000002');
+  assert.equal(n.thumb, 'SSL034_TrialPit_Lebar_2026-11-24_1032_2_thumb.jpg');
+  assert.equal(n.report, 'SSL034_TrialPit_Lebar_2026-11-24_1032_2_report.jpg');
+  assert.equal(n.folder, 'SSL034', 'folder per pole kept');
+  upload('nm_0000004', 'C2', { capturedAt: '2026-11-24T08:05:00+08:00', reportB64: undefined });
+  assert.equal(namesOf('nm_0000004').main, 'SSL034_Installation_SiapPasangSiang_2026-11-24_0805.jpg');
+  assert.equal(namesOf('nm_0000004').report, '', 'no report copy sent (e.g. queued by the v2 app) -> none stored');
+  const row = rows('Photos').find((p) => p.PhotoID === 'nm_0000001');
+  assert.ok(row.ThumbFileID && row.ReportFileID);
+  // thumbnails are found by file ID
+  const th = call(BOSS, 'getThumbs', { poleId: 'SSL034' }).thumbs;
+  assert.deepEqual(Object.keys(th).sort(), ['nm_0000001', 'nm_0000002', 'nm_0000003', 'nm_0000004']);
+  // names use the CURRENT activity / type names
+  call(ADMIN, 'saveNames', { types: [{ TypeID: 'B2', Name: 'Lebar lubang' }] });
+  upload('nm_0000005', 'B2');
+  assert.equal(namesOf('nm_0000005').main, 'SSL034_TrialPit_LebarLubang_2026-11-24_1032.jpg');
+  // retry of the same photo does not create files again
+  const before = Object.keys(rt.state.files).length;
+  upload('nm_0000005', 'B2');
+  assert.equal(Object.keys(rt.state.files).length, before);
+  // temporary pole IDs with spaces
+  call(ADMIN, 'addPole', { poleId: 'TEMP 01', chainage: 'CH.77777', bound: 'EB', category: 'Perlu pasang' });
+  call(TEAM, 'uploadPhoto', { photoId: 'nm_temp_001', poleId: 'TEMP 01', typeId: 'A1', imageB64: IMG, source: 'Camera', capturedAt: '2026-11-24T09:00:00+08:00' });
+  assert.equal(namesOf('nm_temp_001').main, 'TEMP-01_Pegging_Pegging_2026-11-24_0900.jpg');
+});
+
+test('delete photo also moves the report copy to Trash', () => {
+  const { call, admin, rows, rt } = boot();
+  call(TEAM, 'uploadPhoto', { photoId: 'del_rc_0001', poleId: 'SSL034', typeId: 'A1', imageB64: IMG, thumbB64: THUMB, reportB64: REPORT_COPY, source: 'Camera' });
+  const row = rows('Photos')[0];
+  admin('deletePhoto', { photoId: 'del_rc_0001' });
+  [row.DriveFileID, row.ThumbFileID, row.ReportFileID].forEach((id) => assert.equal(rt.state.files[id].trashed, true));
+});
+
+test('older photos (made by the v2 app): file names NEVER renamed on move / swap / pole rename; thumbnails still found; reports use the original', () => {
+  const { v2, call } = buildV2();
+  const v3 = createRuntime({ state: v2.state });
+  v3.g.migrateV3();
+  const tok = (e) => v3.g.issueSession_(e);
+  const c = (e, a, p) => json(v3.g.handle_({ action: a, token: tok(e), ...(p || {}) }));
+  const photos = () => v3.state.sheets.Photos.rowsAsObjects();
+  const nameOf = (id) => v3.state.files[photos().find((p) => p.PhotoID === id).DriveFileID].name;
+  const oldNames = Object.fromEntries(photos().map((p) => [p.PhotoID, nameOf(p.PhotoID)]));
+  assert.ok(Object.values(oldNames).every((n) => /^SSL0\d\d_[A-C]\d_\d{8}-\d{6}_v2p_\d+\.jpg$/.test(n)), 'v2 names');
+  assert.equal(Object.keys(c(BOSS, 'getThumbs', { poleId: 'SSL035' }).thumbs).length, 12, 'old thumbnails found by their old names');
+  // move, swap, rename pole
+  c(ADMIN, 'movePhotos', { photoIds: ['v2p_000013'], targetPoleId: 'SSL050', typeId: 'A1' });
+  c(ADMIN, 'swapPhotos', { poleA: 'SSL035', poleB: 'SSL040' });
+  c(ADMIN, 'editPole', { poleId: 'SSL034', changes: { PoleID: 'SSL900' } });
+  photos().forEach((p) => assert.equal(nameOf(p.PhotoID), oldNames[p.PhotoID], p.PhotoID + ' not renamed'));
+  assert.equal(v3.state.folders[v3.state.files[photos().find((p) => p.PhotoID === 'v2p_000013').DriveFileID].parent].name, 'SSL050', 'but moved to the right folder');
+  const thumbs = c(BOSS, 'getThumbs', { poleId: 'SSL050' }).thumbs;
+  assert.ok(thumbs.v2p_000013, 'moved old thumbnail still found');
+  // report with old photos (no report copy): originals used
+  const r = c(ADMIN, 'generateReport', { activityId: 'A', poleIds: ['SSL900', 'SSL050'] });
+  assert.equal(r.ok, true, r.error);
+});
+
+/** Ten poles per activity with mixed portrait / landscape photos + report copies. */
+function tenPoles(env) {
+  const { call } = env;
+  const ids = Array.from({ length: 10 }, (_, i) => 'SSL' + String(34 + i).padStart(3, '0'));
+  let k = 0;
+  const up = (pole, t, img) => {
+    const r = call(TEAM, 'uploadPhoto', { photoId: 'ten_' + String(++k).padStart(6, '0'), poleId: pole, typeId: t, imageB64: img, thumbB64: THUMB,
+      reportB64: img === PORTRAIT ? PORTRAIT : LANDSCAPE, source: 'Camera', capturedAt: '2027-01-05T09:' + String(k % 60).padStart(2, '0') + ':00+08:00',
+      gpsAvailable: false, measurement: ['B2', 'B3', 'B4'].includes(t) ? '1.' + (k % 9 + 1) : undefined });
+    assert.equal(r.ok, true, r.error);
+    return r.photo.PhotoID;
+  };
+  ids.forEach((pole, i) => {
+    const o = (j) => ((i + j) % 2 ? PORTRAIT : LANDSCAPE); // mixed orientations
+    up(pole, 'A1', o(0)); ['B1', 'B2', 'B3', 'B4'].forEach((t, j) => up(pole, t, o(j)));
+    [0, 1, 2, 3].forEach((j) => up(pole, 'C1', o(j))); up(pole, 'C2', o(1)); up(pole, 'C3', o(0));
+  });
+  return ids;
+}
+
+test('10-pole report for each activity: report copies used, equal-sized cells, photos centred and never cropped (mixed portrait / landscape)', () => {
+  const env = boot();
+  const { admin, rt, rows } = env;
+  const ids = tenPoles(env);
+  const copyIds = new Set(rows('Photos').map((p) => p.ReportFileID));
+  for (const [act, nBlocks, cellsPerPole] of [['A', 1, 1], ['B', 10, 4], ['C', 20, 6]]) {
+    const r = admin('generateReport', { activityId: act, poleIds: ids });
+    assert.equal(r.ok, true, act + ': ' + r.error);
+    const id = r.report.FileURL.match(/\/d\/([^/]+)/)[1];
+    const txt = rt.state.files[id].buf.toString('utf8');
+    const doc = JSON.parse(txt.slice(txt.indexOf('\n') + 1));
+    const tables = doc.children.filter((n) => n.type === 'table');
+    assert.equal(tables.length, nBlocks, act + ' blocks');
+    let photosIn = 0;
+    tables.forEach((t) => {
+      const grid = t.rows[1][0].children.find((c) => c.type === 'table');
+      const box = { A: { w: 160, h: 120 }, B: { w: 118, h: 157 }, C: null }[act];
+      assert.equal(new Set(grid.colWidths).size, 1, 'equal column widths');
+      assert.equal(grid.minHeights.length, grid.rows.length, 'every row has a fixed minimum height');
+      assert.equal(new Set(grid.minHeights).size, 1, 'equal row heights');
+      grid.rows.forEach((row) => row.forEach((cell) => {
+        const p0 = cell.children[0];
+        if (!p0.images.length) return;
+        photosIn++;
+        assert.equal(cell.valign, 'CENTER', 'vertically centred');
+        assert.equal(p0.align, 'CENTER', 'horizontally centred');
+        const img = p0.images[0];
+        const ratio = img.natural.w / img.natural.h;
+        assert.ok(Math.abs(img.w / img.h - ratio) < 0.02, 'aspect ratio kept (not cropped / stretched)');
+        if (box) assert.ok(img.w <= box.w && img.h <= box.h && (img.w === box.w || img.h === box.h), 'fits the cell exactly on one side');
+        assert.ok(/_report\.jpg$/.test(img.name), 'the report copy is inserted: ' + img.name);
+      }));
+    });
+    assert.equal(photosIn, ids.length * cellsPerPole, act + ' photo count');
+  }
+  assert.equal(copyIds.size, 110, '10 poles x 11 photos, each with its own report copy');
+});
+
+test('report size guard: refuses a report whose photos together exceed 45 MB, with a clear message; nothing generated', () => {
+  const env = boot();
+  const { admin, call, rows } = env;
+  const big = Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.alloc(5 * 1024 * 1024)]).toString('base64');
+  const ids = Array.from({ length: 10 }, (_, i) => 'SSL' + String(34 + i).padStart(3, '0'));
+  ids.forEach((pole, i) => call(TEAM, 'uploadPhoto', { photoId: 'huge_' + String(i).padStart(6, '0'), poleId: pole, typeId: 'A1', imageB64: big, source: 'Camera' }));
+  const r = admin('generateReport', { activityId: 'A', poleIds: ids });
+  assert.equal(r.code, 'BAD');
+  assert.match(r.error, /Laporan terlalu besar \(50 MB gambar\)/);
+  assert.equal(rows('Reports').length, 0);
+  assert.equal(admin('generateReport', { activityId: 'A', poleIds: ids.slice(0, 8) }).ok, true, '8 x 5 MB = 40 MB is fine');
+});
+
+test('migrateV3 adds Photos.ThumbFileID / ReportFileID (empty for old photos) without touching existing values', () => {
+  const { v2 } = buildV2();
+  const before = v2.state.sheets.Photos.rowsAsObjects();
+  const v3 = createRuntime({ state: v2.state });
+  v3.g.migrateV3();
+  const after = v3.state.sheets.Photos.rowsAsObjects();
+  assert.deepEqual(v3.state.sheets.Photos.data[0].slice(-2), ['ThumbFileID', 'ReportFileID']);
+  before.forEach((p, i) => Object.keys(p).forEach((k) => assert.equal(after[i][k], p[k])));
+  assert.ok(after.every((p) => p.ThumbFileID === '' && p.ReportFileID === ''));
 });

@@ -123,6 +123,13 @@ kualiti JPEG (**0.6–0.95**, asal **0.88**). Hanya untuk gambar **baru** — ga
 terkini selepas ia mendapat line. Lebih tinggi = gambar lebih jelas tetapi fail lebih besar (anggaran untuk gambar tapak biasa:
 1600/0.8 ≈ 0.3 MB, **2048/0.88 ≈ 0.75 MB**, 3000/0.95 ≈ 2.6 MB setiap gambar).
 
+### Fail gambar dalam Drive
+Setiap tiang ada folder sendiri dalam `Solar Photos/`. Gambar baru dinamakan
+`<ID tiang>_<Aktiviti>_<Jenis>_<Tarikh>_<Masa>.jpg`, cth. `SSL034_TrialPit_Lebar_2026-11-24_1032.jpg`
+(+ `_2`, `_3` jika sama). Setiap gambar baru juga ada `…_thumb.jpg` (gambar kecil untuk aplikasi) dan `…_report.jpg`
+(salinan 1200 px untuk laporan, supaya laporan 10 tiang Installation kekal kecil). Gambar penuh tidak diubah.
+Gambar lama mengekalkan nama asal. Jangan tukar nama fail dalam Drive dengan tangan.
+
 ### Log audit
 **⚙️ Admin → Log audit**: semua perubahan (gambar, pindah/tukar/padam, ukuran, status, ID tiang, peranan, pengguna, RIN, laporan).
 

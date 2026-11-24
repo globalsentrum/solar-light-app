@@ -31,18 +31,19 @@ function jpegSize(buf) {
   throw new Error('not a jpeg');
 }
 
-/** Dummy poles + photos (every type complete; one pole with an admin-ordered C1). */
+/** Ten dummy poles; every photo type alternates portrait / landscape between poles (mixed in every row). */
 function sampleData() {
-  const file = (n) => path.join(SAMPLES, n);
-  const files = { A1: ['peg.jpg'], B1: ['korek.jpg'], B2: ['lebar.jpg'], B3: ['panjang.jpg'], B4: ['dalam.jpg'],
-    C1: ['prog1.jpg', 'prog2.jpg', 'prog3.jpg', 'prog4.jpg'], C2: ['siang.jpg'], C3: ['malam.jpg'] };
-  const meas = { B2: [1.3, 1.0, 1.1, 1.05], B3: [1.6, 1.0, 1.2, 1.0], B4: [1.5, 1.5, 1.45, 1.5] };
-  const poles = ['SSL034', 'SSL035', 'SSL036', 'SSL037', 'SSL040', 'SSL041', 'SSL042'];
+  const file = (n, o) => path.join(SAMPLES, n + '_' + o + '.jpg');
+  const files = { A1: ['peg'], B1: ['korek'], B2: ['lebar'], B3: ['panjang'], B4: ['dalam'],
+    C1: ['prog1', 'prog2', 'prog3', 'prog4'], C2: ['siang'], C3: ['malam'] };
+  const meas = { B2: [1.3, 1.0, 1.1, 1.05, 1.2], B3: [1.6, 1.0, 1.2, 1.0, 1.1], B4: [1.5, 1.5, 1.45, 1.5, 1.55] };
+  const poles = Array.from({ length: 10 }, (_, i) => 'SSL' + String(34 + i).padStart(3, '0'));
   const photos = [];
   poles.forEach((pole, pi) => {
-    Object.keys(files).forEach((t) => files[t].forEach((f, k) => {
+    Object.keys(files).forEach((t, ti) => files[t].forEach((f, k) => {
+      const o = (pi + ti + k) % 2 ? 'P' : 'L';
       photos.push({ PhotoID: pole + '_' + t + '_' + k, PoleID: pole, PhotoTypeID: t, Hidden: false, RetakeFlag: false, ReportOrder: 0,
-        MeasurementM: meas[t] ? meas[t][pi % 4] : '', CapturedAt: '2027-01-05T08:' + String(10 + k).padStart(2, '0') + ':00+08:00', _file: file(f) });
+        MeasurementM: meas[t] ? meas[t][pi % 5] : '', CapturedAt: '2027-01-05T08:' + String(10 + k).padStart(2, '0') + ':00+08:00', _file: file(f, o) });
     }));
   });
   return { poles, photos };
@@ -67,9 +68,10 @@ function grid(block, byId) {
       if (c && c.caption) {
         kids.push(new d.Paragraph({ alignment: d.AlignmentType.CENTER, children: [new d.TextRun({ text: c.caption.toUpperCase(), bold: true, size: 16 })] }));
       }
-      cells.push(new d.TableCell({ width: { size: colW, type: d.WidthType.DXA }, children: kids, verticalAlign: d.VerticalAlign.BOTTOM }));
+      cells.push(new d.TableCell({ width: { size: colW, type: d.WidthType.DXA }, children: kids, verticalAlign: d.VerticalAlign.CENTER }));
     }
-    rows.push(new d.TableRow({ children: cells }));
+    // same as Apps Script: every photo row has the same minimum height (photo box + caption), photos centred
+    rows.push(new d.TableRow({ children: cells, height: { value: PT(block.box.h + 34), rule: d.HeightRule.ATLEAST } }));
   }
   const none = { style: d.BorderStyle.NONE, size: 0, color: 'FFFFFF' };
   return new d.Table({ rows, columnWidths: Array(block.columns).fill(colW), width: { size: PT(523 - 12), type: d.WidthType.DXA },
@@ -123,8 +125,8 @@ async function main() {
   [3, 1, 4, 2].forEach((ord, i) => { c1[i].ReportOrder = ord; });
   const files = [
     await build('A', data.poles, data, outDir),
-    await build('B', data.poles.slice(0, 4), data, outDir),
-    await build('C', ['SSL034', 'SSL035'], data, outDir),
+    await build('B', data.poles, data, outDir),
+    await build('C', data.poles, data, outDir),
   ];
   try {
     execFileSync('soffice', ['--headless', '--convert-to', 'pdf', '--outdir', outDir].concat(files), { stdio: 'pipe', timeout: 180000 });
