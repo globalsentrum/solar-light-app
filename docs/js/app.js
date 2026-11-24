@@ -757,8 +757,9 @@
     var now = new Date();
     var type = L.typeById(cap.typeId);
     overlay('Memproses gambar…');
+    var ps = L.photoSettings({ PhotoMaxSide: (S.data.photoSettings || {}).maxSide, PhotoQuality: (S.data.photoSettings || {}).quality });
     W.process(file, {
-      source: cap.source, now: now,
+      source: cap.source, now: now, maxSide: ps.maxSide, quality: ps.quality,
       getDeviceGps: function () { overlay('Mendapatkan lokasi GPS… (maksimum 15 saat)'); return S.gps.getFix(15000, 30000); }
     }).then(function (res) {
       overlay(false);
@@ -1525,6 +1526,18 @@
     return '<span class="counted"><input name="' + name + '" value="' + esc(value) + '" maxlength="' + L.LABEL_MAX + '" data-count="1"' + (extra || '') + '>' +
       '<span class="cnt">' + String(value).length + '/' + L.LABEL_MAX + '</span></span>';
   }
+  function photoSettingsForm() {
+    var ps = L.photoSettings({ PhotoMaxSide: (S.data.photoSettings || {}).maxSide, PhotoQuality: (S.data.photoSettings || {}).quality });
+    var lim = L.PHOTO_LIMITS;
+    return '<form id="photoForm" class="card form" novalidate><h3>Kualiti gambar baru</h3>' +
+      '<label>Saiz maksimum sisi panjang (px) <span class="muted small">(' + lim.maxSide[0] + '–' + lim.maxSide[1] + ', asal ' + L.PHOTO_DEFAULTS.maxSide + ')</span>' +
+      '<input name="maxSide" type="number" inputmode="numeric" min="' + lim.maxSide[0] + '" max="' + lim.maxSide[1] + '" step="1" value="' + ps.maxSide + '"></label>' +
+      '<label>Kualiti JPEG <span class="muted small">(' + lim.quality[0] + '–' + lim.quality[1] + ', asal ' + L.PHOTO_DEFAULTS.quality + ')</span>' +
+      '<input name="quality" type="number" inputmode="decimal" min="' + lim.quality[0] + '" max="' + lim.quality[1] + '" step="0.01" value="' + ps.quality + '"></label>' +
+      '<div class="muted small">Hanya untuk gambar baru. Lebih tinggi = gambar lebih jelas tetapi fail lebih besar (muat naik lebih lama, laporan lebih besar).</div>' +
+      '<div id="photoErr" class="err" hidden></div><button class="btn" type="submit">Simpan</button></form>';
+  }
+
   function renderNames() {
     setChrome('Tetapan & label', '#/admin', 'admin');
     var acts = L.activities(S.data.activities);
@@ -1534,6 +1547,7 @@
       '<form id="labelsForm" class="card form"><h3>Label status & kad</h3>' + Object.keys(L.LABEL_DEFAULTS).map(function (k) {
         return '<label>' + esc(labelsDesc[k]) + ' <span class="muted small">(asal: ' + esc(L.LABEL_DEFAULTS[k]) + ')</span>' + counted('lab_' + k, lab(k), ' required') + '</label>';
       }).join('') + '<button class="btn" type="submit">Simpan label</button></form>' +
+      photoSettingsForm() +
       '<form id="namesForm">' + acts.map(function (a) {
         return '<section class="card form"><div class="muted small">Aktiviti ' + a.ActivityID + '</div>' +
           '<label>Nama aktiviti' + counted('act_' + a.ActivityID, a.Name, ' required') + '</label>' +
@@ -1550,6 +1564,15 @@
         c.classList.toggle('full', i.value.length >= L.LABEL_MAX);
       };
     });
+    $('photoForm').onsubmit = function (ev) {
+      ev.preventDefault();
+      var f = ev.target;
+      var v = L.validatePhotoSettings(f.maxSide.value, f.quality.value);
+      if (!v.ok) { var el = $('photoErr'); el.textContent = v.error; el.hidden = false; return; }
+      adminCall('savePhotoSettings', { maxSide: v.maxSide, quality: v.quality }).then(function (r) {
+        S.data.photoSettings = r.photoSettings; SolarDB.set('data', S.data); render(); toast('Tetapan gambar disimpan');
+      });
+    };
     $('labelsForm').onsubmit = function (ev) {
       ev.preventDefault();
       var f = ev.target, labels = {};

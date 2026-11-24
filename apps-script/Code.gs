@@ -20,7 +20,7 @@
 
 var TZ = 'Asia/Kuala_Lumpur';
 var CHUNK_BYTES = 4 * 1024 * 1024;
-var MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+var MAX_IMAGE_BYTES = 15 * 1024 * 1024; // up to 3000 px at quality 0.95 (admin maximum)
 
 var SCHEMA = {
   Poles: ['PoleID', 'Bound', 'Chainage', 'ChainageExact', 'Category', 'PlannedDate', 'IsDone', 'DoneBy', 'DoneAt', 'UpdatedAt',
@@ -42,6 +42,8 @@ var DEFAULT_SETTINGS = {
   ClientID: '',
   AppURL: '',
   ReportMaxPhotos: '60',
+  PhotoMaxSide: '2048',
+  PhotoQuality: '0.88',
   SessionDays: '30',
   PhotosFolderID: '',
   ReportsFolderID: ''
@@ -437,6 +439,7 @@ ACTIONS.bootstrap = function (user) {
     reports: SolarLogic.can(user.perms, 'download_report') || SolarLogic.can(user.perms, 'generate_report')
       ? clean_(readTable_('Reports').rows).reverse() : [],
     labels: SolarLogic.labels(s),
+    photoSettings: SolarLogic.photoSettings(s),
     names: names,
     feed: SolarLogic.can(user.perms, 'view_dashboard') ? feed : []
   };
@@ -932,6 +935,25 @@ ACTIONS.saveLabels = function (user, b) {
       }
     });
     return { labels: SolarLogic.labels(settings_()) };
+  });
+};
+
+/** Photo quality for NEW photos: { maxSide (1280-3000 px), quality (0.6-0.95) }. Existing photos are not changed. */
+ACTIONS.savePhotoSettings = function (user, b) {
+  assert_(user, 'edit_settings');
+  var v = SolarLogic.validatePhotoSettings(b.maxSide, b.quality);
+  if (!v.ok) throw apiError_('BAD', v.error);
+  return withLock_(function () {
+    var cur = settings_();
+    if (str_(cur.PhotoMaxSide) !== String(v.maxSide)) {
+      audit_(user, 'SettingEdited', 'Setting', 'PhotoMaxSide', 'Value', cur.PhotoMaxSide, v.maxSide);
+      setSetting_('PhotoMaxSide', String(v.maxSide));
+    }
+    if (str_(cur.PhotoQuality) !== String(v.quality)) {
+      audit_(user, 'SettingEdited', 'Setting', 'PhotoQuality', 'Value', cur.PhotoQuality, v.quality);
+      setSetting_('PhotoQuality', String(v.quality));
+    }
+    return { photoSettings: SolarLogic.photoSettings(settings_()) };
   });
 };
 

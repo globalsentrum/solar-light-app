@@ -438,3 +438,17 @@ test('v3 report row status: Sedia / Perlu pilih gambar / Kurang gambar / Dah dil
   assert.equal(L.poleReportStatus('A', pole(), types, trial()).hasPhotos, false, 'only photos of that activity count');
   assert.deepEqual(L.reportMissing('B', 'SSL900', types, trial().concat([photo({ PhotoTypeID: 'B1' })])), ['Korek: pilih 1 daripada 2 gambar']);
 });
+
+test('photo quality settings: defaults 2048 px / 0.88, ranges 1280–3000 px and 0.6–0.95', () => {
+  assert.deepEqual(L.PHOTO_DEFAULTS, { maxSide: 2048, quality: 0.88 });
+  assert.deepEqual(L.photoSettings({}), { maxSide: 2048, quality: 0.88 });
+  const ok = (m, q) => assert.equal(L.validatePhotoSettings(m, q).ok, true, m + '/' + q);
+  const bad = (m, q, re) => assert.match(L.validatePhotoSettings(m, q).error, re, m + '/' + q);
+  ok(1280, 0.6); ok(3000, 0.95); ok('2048', '0,88'); ok(2500, 0.9);
+  bad(1279, 0.88, /1280–3000/); bad(3001, 0.88, /1280–3000/); bad(2048.5, 0.88, /nombor bulat/); bad('', 0.88, /1280–3000/); bad('abc', 0.88, /1280–3000/);
+  bad(2048, 0.59, /0.6–0.95/); bad(2048, 0.96, /0.6–0.95/); bad(2048, 0.885, /2 titik perpuluhan/); bad(2048, '', /0.6–0.95/);
+  // values typed by hand in the Sheet: invalid ones fall back to the default, one at a time
+  assert.deepEqual(L.photoSettings({ PhotoMaxSide: '2600', PhotoQuality: '0.7' }), { maxSide: 2600, quality: 0.7 });
+  assert.deepEqual(L.photoSettings({ PhotoMaxSide: '9999', PhotoQuality: '0.7' }), { maxSide: 2048, quality: 0.7 });
+  assert.deepEqual(L.photoSettings({ PhotoMaxSide: '2600', PhotoQuality: '2' }), { maxSide: 2600, quality: 0.88 });
+});

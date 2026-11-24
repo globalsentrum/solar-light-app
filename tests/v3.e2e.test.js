@@ -398,3 +398,157 @@ test('phone screenshots for review: dashboard and schedule', async () => {
   await shot(page, '6-settings-labels.png');
   await s.close();
 });
+
+// ------------------------------------------------------------------ photo quality (v3 addition)
+function jpegSize(buf) {
+  let i = 2;
+  while (i < buf.length) {
+    if (buf[i] !== 0xff) { i++; continue; }
+    const m = buf[i + 1];
+    if (m >= 0xc0 && m <= 0xc3) return { w: buf.readUInt16BE(i + 7), h: buf.readUInt16BE(i + 5) };
+    i += 2 + buf.readUInt16BE(i + 2);
+  }
+  return null;
+}
+
+/** A 12 MP phone-like test picture made in the browser: 'scene' (detailed outdoor-like) or 'noise' (worst case). */
+async function makePhoto(page, kind) {
+  return page.evaluate(async (kind) => {
+    const c = document.createElement('canvas'); c.width = 4032; c.height = 3024;
+    const x = c.getContext('2d');
+    let seed = 42; const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+    const g = x.createLinearGradient(0, 0, 0, 3024); g.addColorStop(0, '#8fb8e0'); g.addColorStop(0.45, '#d8e4ee'); g.addColorStop(0.5, '#6d7a52'); g.addColorStop(1, '#4b4030');
+    x.fillStyle = g; x.fillRect(0, 0, 4032, 3024);
+    for (let i = 0; i < 6000; i++) { // gravel, grass, leaves
+      x.fillStyle = `hsl(${Math.floor(rnd() * 360)},${20 + rnd() * 40}%,${20 + rnd() * 50}%)`;
+      const r = 2 + rnd() * 30; x.beginPath(); x.arc(rnd() * 4032, 1400 + rnd() * 1624, r, 0, 7); x.fill();
+    }
+    x.fillStyle = '#cfcfcf'; x.fillRect(1950, 300, 70, 2400); // pole
+    const img = x.getImageData(0, 0, 4032, 3024); const d = img.data;
+    const amp = kind === 'noise' ? 255 : 18; // sensor noise; 'noise' = every pixel random (worst case for JPEG)
+    for (let i = 0; i < d.length; i += 4) {
+      if (kind === 'noise') { d[i] = rnd() * 255; d[i + 1] = rnd() * 255; d[i + 2] = rnd() * 255; }
+      else { const n = (rnd() - 0.5) * amp; d[i] += n; d[i + 1] += n; d[i + 2] += n; }
+    }
+    x.putImageData(img, 0, 0);
+    const blob = await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.92));
+    window.__testPhoto = window.__testPhoto || {};
+    window.__testPhoto[kind] = blob;
+    return blob.size;
+  }, kind);
+}
+async function processSize(page, kind, maxSide, quality) {
+  return page.evaluate(async ({ kind, maxSide, quality }) => {
+    const res = await SolarWatermark.process(new File([window.__testPhoto[kind]], 'p.jpg', { type: 'image/jpeg' }), {
+      source: 'Camera', now: new Date('2027-01-05T06:05:00Z'), maxSide, quality, getDeviceGps: async () => ({ lat: 3.1, lng: 101.6, acc: 5 }) });
+    const b64 = await new Promise((r) => { const fr = new FileReader(); fr.onload = () => r(fr.result.split(',')[1].length); fr.readAsDataURL(res.full); });
+    return { w: res.width, h: res.height, bytes: res.full.size, b64, thumb: res.thumb.size, box: res.stamp.box };
+  }, { kind, maxSide, quality });
+}
+
+test('photo quality: 12 MP photo -> 2048 px / 0.88 by default; upload sizes measured; watermark scales; max setting stays under the upload limit', async () => {
+  const s = await setup('team@example.com');
+  const { page, base } = s;
+  await page.goto(base + '/#/jadual');
+  await page.waitForSelector('.seg');
+  await makePhoto(page, 'scene');
+  await makePhoto(page, 'noise');
+  const oldV2 = await processSize(page, 'scene', 1600, 0.8);
+  const def = await processSize(page, 'scene', undefined, undefined);
+  const max = await processSize(page, 'scene', 3000, 0.95);
+  const min = await processSize(page, 'scene', 1280, 0.6);
+  const worst = await processSize(page, 'noise', 3000, 0.95);
+  const kb = (n) => Math.round(n / 1024) + ' KB';
+  const table = { 'v2 (1600 / 0.8)': oldV2, 'v3 default (2048 / 0.88)': def, 'minimum (1280 / 0.6)': min, 'maximum (3000 / 0.95)': max, 'worst case noise (3000 / 0.95)': worst };
+  fs.writeFileSync(path.join(OUT, 'photo-sizes.json'), JSON.stringify(Object.fromEntries(Object.entries(table).map(([k, v]) => [k, { size: v.w + 'x' + v.h, jpeg: kb(v.bytes), upload_base64: kb(v.b64) }])), null, 1));
+  assert.deepEqual([def.w, def.h], [2048, 1536]);
+  assert.deepEqual([max.w, max.h], [3000, 2250]);
+  assert.deepEqual([min.w, min.h], [1280, 960]);
+  assert.ok(def.bytes > oldV2.bytes, 'higher quality = bigger file');
+  assert.ok(def.bytes < 2.5 * 1024 * 1024, 'default photo < 2.5 MB: ' + kb(def.bytes));
+  assert.ok(worst.bytes < 15 * 1024 * 1024, 'even the worst case at the maximum setting fits the 15 MB server limit: ' + kb(worst.bytes));
+  assert.ok(def.thumb < 40000 && max.thumb < 40000, 'thumbnail size unchanged');
+  // watermark text scales with the photo: same share of the long side at every size
+  const share = (r) => r.box.h / Math.max(r.w, r.h);
+  assert.ok(Math.abs(share(def) - share(oldV2)) < 0.004 && Math.abs(share(max) - share(oldV2)) < 0.004, [share(oldV2), share(def), share(max)].join(' / '));
+  assert.ok(def.box.h > oldV2.box.h && max.box.h > def.box.h, 'bigger photo -> bigger stamp');
+  await s.close();
+});
+
+test('photo quality setting: admin edits in Settings (range enforced); new photos use it, existing photos unchanged; offline queue still works', async () => {
+  const s = await setup('admin@example.com');
+  const { page, base, ctx, srv, sheet } = s;
+  const fileDims = (photoId) => {
+    const p = sheet('Photos').find((x) => x.PhotoID === photoId);
+    return jpegSize(srv.rt.state.files[p.DriveFileID].buf);
+  };
+  const take = async (pole, typeId) => {
+    const chooser = page.waitForEvent('filechooser');
+    await page.locator(`button[data-act=addPhoto][data-type="${typeId}"]`).click();
+    await page.click('text=📷 Kamera');
+    (await chooser).setFiles(path.join(FIX, 'big-photo.jpg'));
+    await page.waitForFunction(() => { const t = document.querySelector('#toast'); return !t.hidden && t.textContent.includes('Gambar disimpan'); }, null, { timeout: 60000 });
+    await page.evaluate(() => { document.querySelector('#toast').hidden = true; });
+  };
+  // a 12 MP source file on disk for the file chooser
+  await page.goto(base + '/#/jadual');
+  await page.waitForSelector('.seg');
+  await makePhoto(page, 'scene');
+  const b64 = await page.evaluate(async () => new Promise((r) => { const fr = new FileReader(); fr.onload = () => r(fr.result.split(',')[1]); fr.readAsDataURL(window.__testPhoto.scene); }));
+  fs.writeFileSync(path.join(FIX, 'big-photo.jpg'), Buffer.from(b64, 'base64'));
+  try {
+    // photo with the default setting
+    await page.goto(base + '/#/tiang/SSL034');
+    await page.waitForSelector('.act');
+    await take('SSL034', 'A1');
+    await page.waitForFunction(() => document.querySelector('#syncBtn').textContent.includes('Semua disimpan'), null, { timeout: 60000 });
+    const first = sheet('Photos')[0].PhotoID;
+    assert.deepEqual(fileDims(first), { w: 2048, h: 1536 });
+    // settings screen: out-of-range refused, then 2600 / 0.9
+    await page.goto(base + '/#/admin/tetapan');
+    await page.waitForSelector('#photoForm');
+    assert.equal(await page.inputValue('#photoForm input[name=maxSide]'), '2048');
+    assert.equal(await page.inputValue('#photoForm input[name=quality]'), '0.88');
+    await page.fill('#photoForm input[name=maxSide]', '3500');
+    await page.click('#photoForm button[type=submit]');
+    assert.match(await page.textContent('#photoErr'), /1280–3000/);
+    await page.fill('#photoForm input[name=maxSide]', '2600');
+    await page.fill('#photoForm input[name=quality]', '0.9');
+    await page.click('#photoForm button[type=submit]');
+    await page.waitForFunction(() => document.querySelector('#toast').textContent.includes('Tetapan gambar disimpan'));
+    assert.equal(sheet('Settings').find((x) => x.Key === 'PhotoMaxSide').Value, '2600');
+    await page.evaluate(() => { document.querySelector('#toast').hidden = true; window.scrollTo(0, document.querySelector('#photoForm').offsetTop - 70); });
+    await page.screenshot({ path: path.join(OUT, '7-photo-quality-settings.png') });
+    // OFFLINE: the phone uses the setting it already has; queue 2 big photos + reload while offline
+    await page.goto(base + '/#/tiang/SSL035');
+    await page.waitForSelector('.act');
+    await page.waitForFunction(() => navigator.serviceWorker && navigator.serviceWorker.controller);
+    await ctx.setOffline(true);
+    await take('SSL035', 'C1');
+    await take('SSL035', 'C1');
+    assert.equal(await page.textContent('#syncBtn'), '⏳ 2 item menunggu line');
+    const queued = await page.evaluate(async () => (await SolarDB.queueAll()).map((i) => i.image.byteLength));
+    assert.equal(queued.length, 2);
+    await page.reload();
+    await page.waitForSelector('.act');
+    assert.equal(await page.textContent('#syncBtn'), '⏳ 2 item menunggu line');
+    assert.equal(await page.locator('.tile:has([data-type=C1]) .tb.wait').count(), 2);
+    assert.equal(sheet('Photos').filter((p) => p.PoleID === 'SSL035').length, 0);
+    srv.flags.dropNextResponse = 1; // a lost reply: retried, never duplicated
+    await ctx.setOffline(false);
+    await page.evaluate(() => window.dispatchEvent(new Event('online')));
+    await page.waitForFunction(() => document.querySelector('#syncBtn').textContent.includes('Semua disimpan'), null, { timeout: 60000 });
+    const newOnes = sheet('Photos').filter((p) => p.PoleID === 'SSL035');
+    assert.equal(newOnes.length, 2, 'no duplicate');
+    newOnes.forEach((p) => assert.deepEqual(fileDims(p.PhotoID), { w: 2600, h: 1950 }, 'new photos use the new setting'));
+    const sizes = newOnes.map((p) => srv.rt.state.files[p.DriveFileID].buf.length);
+    assert.deepEqual(sizes.slice().sort(), queued.slice().sort(), 'uploaded bytes = queued bytes');
+    assert.deepEqual(fileDims(first), { w: 2048, h: 1536 }, 'existing photo unchanged');
+    // Team cannot see / change it
+    const r = JSON.parse(JSON.stringify(srv.rt.g.handle_({ action: 'savePhotoSettings', token: srv.rt.g.issueSession_('team@example.com'), maxSide: 3000, quality: 0.95 })));
+    assert.equal(r.code, 'FORBIDDEN');
+  } finally {
+    fs.unlinkSync(path.join(FIX, 'big-photo.jpg'));
+  }
+  await s.close();
+});

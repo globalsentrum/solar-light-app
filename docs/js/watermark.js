@@ -8,9 +8,9 @@
  */
 var SolarWatermark = (function () {
   'use strict';
-  var MAX_SIDE = 1600;
+  var MAX_SIDE = 2048;   // default; the app passes the admin setting (o.maxSide)
   var THUMB_SIDE = 360;
-  var QUALITY = 0.8;
+  var QUALITY = 0.88;   // default; the app passes the admin setting (o.quality)
   var KL_OFFSET_MS = 8 * 3600 * 1000; // Malaysia: UTC+8, no daylight saving
 
   function pad(n) { return (n < 10 ? '0' : '') + n; }
@@ -115,7 +115,8 @@ var SolarWatermark = (function () {
 
   /**
    * @param {File|Blob} file
-   * @param {object} o  { source: 'Camera'|'Gallery', getDeviceGps: () => Promise<{lat,lng,acc}|null>, now?: Date }
+   * @param {object} o  { source: 'Camera'|'Gallery', getDeviceGps: () => Promise<{lat,lng,acc}|null>, now?: Date,
+   *                     maxSide?: px (long side), quality?: JPEG 0-1 }  — watermark text size scales with the long side
    * @returns Promise<{ full: Blob, thumb: Blob, meta, stamp: {lines, box}, width, height }>
    */
   function process(file, o) {
@@ -142,7 +143,8 @@ var SolarWatermark = (function () {
         if (source === 'Gallery' && (meta.timeFrom !== 'exif' || meta.gpsFrom !== 'exif')) meta.fromGalleryLabel = true;
         return loadImage(file).then(function (li) {
           var iw = li.img.naturalWidth, ih = li.img.naturalHeight;
-          var scale = Math.min(1, MAX_SIDE / Math.max(iw, ih));
+          var maxSide = o.maxSide || MAX_SIDE;
+          var scale = Math.min(1, maxSide / Math.max(iw, ih));
           var w = Math.round(iw * scale), h = Math.round(ih * scale);
           var c = document.createElement('canvas');
           c.width = w; c.height = h;
@@ -155,7 +157,7 @@ var SolarWatermark = (function () {
           var t = document.createElement('canvas');
           t.width = Math.round(w * ts); t.height = Math.round(h * ts);
           t.getContext('2d').drawImage(c, 0, 0, t.width, t.height);
-          return Promise.all([toBlob(c, QUALITY), toBlob(t, 0.7)]).then(function (b) {
+          return Promise.all([toBlob(c, o.quality || QUALITY), toBlob(t, 0.7)]).then(function (b) {
             c.width = c.height = 0; // free memory on iPhone
             return { full: b[0], thumb: b[1], meta: meta, stamp: { lines: lines, box: box }, width: w, height: h };
           });

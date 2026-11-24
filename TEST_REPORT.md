@@ -1,6 +1,6 @@
 # Laporan Ujian — Aplikasi Lampu Solar Karak (versi 3)
 
-Tarikh: 24/11/2026 · Keputusan: **85 / 85 lulus**: 25 logik + 16 backend v2 (regresi) + 21 backend v3 + 14 pelayar v2 (regresi) + 10 pelayar v3
+Tarikh: 24/11/2026 · Keputusan: **90 / 90 lulus**: 26 logik + 16 backend v2 (regresi) + 23 backend v3 + 14 pelayar v2 (regresi) + 12 pelayar v3
 Jalankan semula: `npm install` → `npm run test:all`. Ujian menggunakan **data tiang dummy** (123 tiang, jumlah sama, chainage rekaan).
 
 | Bahagian | Cara ujian |
@@ -63,6 +63,24 @@ Gunakan senarai semak telefon di bawah.
 - Jalankan kali kedua → "tiada perubahan" dan Sheet sama tepat. Nama C2 yang ditukar admin dikekalkan.
 - Item dalam barisan telefon dari aplikasi v2 (gambar dengan ukuran `1,2`, nota, Siap) — dan v1 — diterima selepas kemas kini.
 
+**Kualiti gambar (tambahan v3)** — gambar ujian 12 MP (4032×3024) seperti gambar tapak:
+
+| Tetapan | Saiz | JPEG | Muat naik (base64) |
+|---|---|---|---|
+| v2 (1600 / 0.8) | 1600×1200 | 275 KB | 366 KB |
+| **v3 asal (2048 / 0.88)** | 2048×1536 | **746 KB** | 995 KB |
+| minimum (1280 / 0.6) | 1280×960 | 125 KB | 166 KB |
+| maksimum (3000 / 0.95) | 3000×2250 | 2630 KB | 3506 KB |
+| kes terburuk (hingar penuh, 3000 / 0.95) | 3000×2250 | 5759 KB | 7679 KB |
+
+- Had muat naik pelayan dinaikkan 8 → 15 MB (kes terburuk pada tetapan maksimum muat); 12 MB diterima, 16 MB ditolak.
+- Teks watermark ikut skala: tinggi kotak = bahagian yang sama daripada sisi panjang pada 1600, 2048 dan 3000 px.
+- Thumbnail tidak berubah (< 40 KB). Gambar kecil tidak dibesarkan.
+- Tetapan: julat dikuatkuasa di telefon dan pelayan (1280–3000 px, 0.6–0.95, maks 2 perpuluhan); hanya *edit_settings*; dicatat;
+  nilai salah yang ditaip terus dalam Sheet → nilai asal digunakan; `migrateV3` menambah 2048 / 0.88 pada Sheet v2.
+- **Luar talian**: tetapan 2600 / 0.9 → 2 gambar 12 MP dalam barisan semasa offline → muat semula aplikasi → online dengan
+  satu jawapan hilang → tepat 2 gambar, 2600×1950, bait di pelayan = bait dalam barisan; gambar lama kekal 2048×1536.
+
 ## Pepijat ditemui & dibaiki semasa ujian v3
 1. Muat naik/nota ulangan dengan ID sedia ada tidak menyemak kebenaran dahulu → dibaiki.
 2. Bar pilihan di Jadual terlebih lebar (butang terkeluar skrin) → dibaiki, kini diuji pada 360 px.
@@ -89,3 +107,6 @@ Gunakan senarai semak telefon di bawah.
 - [ ] Label: tukar satu label kepada 20 aksara → semak dashboard & jadual pada telefon kecil
 - [ ] Pelan: tarikh pelan dipaparkan dalam jadual; pindah tarikh → jadual ikut; tiang tanpa pelan "Belum dirancang"
 - [ ] Mod kapal terbang: ambil gambar & nota → sambung semula → ✅ Semua disimpan (seperti v2)
+- [ ] Kualiti gambar: ambil gambar baru → buka fail dalam Drive → 2048 px sisi panjang, teks watermark jelas; masa muat naik
+      dengan data mudah alih biasa boleh diterima; iPhone lama tidak tergantung semasa memproses
+- [ ] Tukar ke 3000 / 0.95 → ambil satu gambar → semak saiz fail; tukar balik ke 2048 / 0.88

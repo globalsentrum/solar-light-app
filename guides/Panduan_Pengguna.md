@@ -117,6 +117,12 @@ Had satu laporan (Settings `ReportMaxPhotos` = 60): Pegging 60 tiang, Trial Pit 
 **⚙️ Admin → Tetapan & label**: label status / kad dashboard dan nama aktiviti / jenis gambar (maks **20 aksara**, ada kiraan).
 Menukar label tidak mengubah data atau penapis.
 
+### Kualiti gambar
+**⚙️ Admin → Tetapan & label → Kualiti gambar baru**: saiz maksimum sisi panjang (**1280–3000 px**, asal **2048**) dan
+kualiti JPEG (**0.6–0.95**, asal **0.88**). Hanya untuk gambar **baru** — gambar lama tidak berubah. Telefon menggunakan tetapan
+terkini selepas ia mendapat line. Lebih tinggi = gambar lebih jelas tetapi fail lebih besar (anggaran untuk gambar tapak biasa:
+1600/0.8 ≈ 0.3 MB, **2048/0.88 ≈ 0.75 MB**, 3000/0.95 ≈ 2.6 MB setiap gambar).
+
 ### Log audit
 **⚙️ Admin → Log audit**: semua perubahan (gambar, pindah/tukar/padam, ukuran, status, ID tiang, peranan, pengguna, RIN, laporan).
 

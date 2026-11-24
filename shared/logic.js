@@ -429,6 +429,30 @@ var SolarLogic = (function () {
     }
   }
 
+  // ---------- photo quality (admin Settings; used by the phone for NEW photos) ----------
+  var PHOTO_DEFAULTS = { maxSide: 2048, quality: 0.88 };
+  var PHOTO_LIMITS = { maxSide: [1280, 3000], quality: [0.6, 0.95] };
+  function validatePhotoSettings(maxSide, quality) {
+    var errors = [];
+    var m = Number(String(maxSide).trim()), q = Number(String(quality).trim().replace(',', '.'));
+    if (String(maxSide).trim() === '' || !isFinite(m) || Math.round(m) !== m || m < PHOTO_LIMITS.maxSide[0] || m > PHOTO_LIMITS.maxSide[1]) {
+      errors.push('Saiz maksimum mesti nombor bulat ' + PHOTO_LIMITS.maxSide[0] + '–' + PHOTO_LIMITS.maxSide[1] + ' px.');
+    }
+    if (String(quality).trim() === '' || !isFinite(q) || q < PHOTO_LIMITS.quality[0] || q > PHOTO_LIMITS.quality[1] || Math.round(q * 100) !== q * 100) {
+      errors.push('Kualiti JPEG mesti ' + PHOTO_LIMITS.quality[0] + '–' + PHOTO_LIMITS.quality[1] + ' (maks 2 titik perpuluhan).');
+    }
+    return errors.length ? { ok: false, error: errors.join(' ') } : { ok: true, maxSide: m, quality: q };
+  }
+  /** Settings sheet values -> {maxSide, quality}; missing or invalid values fall back to the defaults. */
+  function photoSettings(settings) {
+    var s = settings || {};
+    var v = validatePhotoSettings(s.PhotoMaxSide, s.PhotoQuality);
+    if (v.ok) return { maxSide: v.maxSide, quality: v.quality };
+    var m = validatePhotoSettings(s.PhotoMaxSide, PHOTO_DEFAULTS.quality);
+    var q = validatePhotoSettings(PHOTO_DEFAULTS.maxSide, s.PhotoQuality);
+    return { maxSide: m.ok ? m.maxSide : PHOTO_DEFAULTS.maxSide, quality: q.ok ? q.quality : PHOTO_DEFAULTS.quality };
+  }
+
   // ---------- labels ----------
   /** Settings rows/object -> {key: label}; values over 20 chars or empty fall back to the default. */
   function labels(settings) {
@@ -560,7 +584,8 @@ var SolarLogic = (function () {
     bool: bool, isPoleId: isPoleId, validatePoleId: validatePoleId, sameId: sameId, isActive: isActive, workKey: workKey,
     needsNightPhoto: needsNightPhoto, typeReportState: typeReportState, poleReportStatus: poleReportStatus, hasRin: hasRin,
     matchesFilter: matchesFilter, labels: labels, validateLabel: validateLabel, nextPlanDate: nextPlanDate,
-    validateImport: validateImport, parsePermissions: parsePermissions, poleIdFromLegacy: poleIdFromLegacy, poleMatchesQuery: poleMatchesQuery,
+    validateImport: validateImport, parsePermissions: parsePermissions,
+    PHOTO_DEFAULTS: PHOTO_DEFAULTS, PHOTO_LIMITS: PHOTO_LIMITS, validatePhotoSettings: validatePhotoSettings, photoSettings: photoSettings, poleIdFromLegacy: poleIdFromLegacy, poleMatchesQuery: poleMatchesQuery,
     isChainageExact: isChainageExact, categoryFromWorkArea: categoryFromWorkArea, chainageSortKey: chainageSortKey,
     activities: activities, photoTypes: photoTypes, typeById: typeById, typesOfActivity: typesOfActivity,
     parseMeasurement: parseMeasurement, hasMeasurement: hasMeasurement, formatMeasurement: formatMeasurement,

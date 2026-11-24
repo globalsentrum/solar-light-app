@@ -610,3 +610,36 @@ test('a retried upload / note with an existing ID still needs the permission', (
   call(TEAM, 'addNote', { noteId: 'dupnote1', poleId: 'SSL034', text: 'x' });
   assert.equal(call(BOSS, 'addNote', { noteId: 'dupnote1', poleId: 'SSL034', text: 'x' }).code, 'FORBIDDEN');
 });
+
+test('photo quality settings: admin only (edit_settings), validated, logged, sent to phones; uploads up to 15 MB accepted', () => {
+  const { admin, call, rows, rt } = boot();
+  assert.deepEqual(call(TEAM, 'bootstrap').photoSettings, { maxSide: 2048, quality: 0.88 }, 'defaults from setup');
+  assert.equal(rows('Settings').find((x) => x.Key === 'PhotoMaxSide').Value, '2048');
+  assert.equal(call(TEAM, 'savePhotoSettings', { maxSide: 2500, quality: 0.9 }).code, 'FORBIDDEN');
+  assert.match(admin('savePhotoSettings', { maxSide: 1000, quality: 0.9 }).error, /1280–3000/);
+  assert.match(admin('savePhotoSettings', { maxSide: 2500, quality: 0.99 }).error, /0.6–0.95/);
+  const r = admin('savePhotoSettings', { maxSide: 2500, quality: '0,9' });
+  assert.deepEqual(r.photoSettings, { maxSide: 2500, quality: 0.9 });
+  assert.deepEqual(call(BOSS, 'bootstrap').photoSettings, { maxSide: 2500, quality: 0.9 });
+  assert.deepEqual(rows('AuditLog').filter((a) => a.Action === 'SettingEdited').map((a) => a.EntityID + ':' + a.OldValue + '>' + a.NewValue),
+    ['PhotoMaxSide:2048>2500', 'PhotoQuality:0.88>0.9']);
+  // value typed by hand in the Sheet outside the range -> default used
+  rt.g.setSetting_('PhotoMaxSide', '12000');
+  assert.deepEqual(call(TEAM, 'bootstrap').photoSettings, { maxSide: 2048, quality: 0.9 });
+  // upload size limit: 12 MB accepted, 16 MB refused
+  const big = (mb) => Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.alloc(mb * 1024 * 1024)]).toString('base64');
+  assert.equal(call(TEAM, 'uploadPhoto', { photoId: 'big_12mb_0001', poleId: 'SSL034', typeId: 'A1', imageB64: big(12), source: 'Camera' }).ok, true);
+  assert.match(call(TEAM, 'uploadPhoto', { photoId: 'big_16mb_0001', poleId: 'SSL034', typeId: 'A1', imageB64: big(16), source: 'Camera' }).error, /terlalu besar/);
+});
+
+test('migrateV3 adds PhotoMaxSide / PhotoQuality to a v2 sheet (defaults), second run unchanged', () => {
+  const v2 = createRuntime({ ownerEmail: ADMIN, codeDir: path.join(__dirname, 'fixtures', 'v2-code') });
+  v2.g.setup();
+  assert.ok(!v2.state.sheets.Settings.rowsAsObjects().some((x) => x.Key === 'PhotoMaxSide'));
+  const v3 = createRuntime({ state: v2.state });
+  v3.g.migrateV3();
+  const s = v3.state.sheets.Settings.rowsAsObjects();
+  assert.equal(s.find((x) => x.Key === 'PhotoMaxSide').Value, '2048');
+  assert.equal(s.find((x) => x.Key === 'PhotoQuality').Value, '0.88');
+  assert.match(v3.g.migrateV3(), /tiada perubahan/);
+});

@@ -487,21 +487,21 @@ test('watermark: camera / gallery with EXIF / gallery without EXIF / gallery dat
   // 1) camera-style photo (no EXIF), GPS ok
   let r = await runWatermark(page, 'camera_noexif.jpg', { source: 'Camera', now, deviceGps: dev });
   save('watermark-1-camera.jpg', r);
-  assert.deepEqual([r.w, r.h], [1600, 1200], 'resized to 1600 long side');
+  assert.deepEqual([r.w, r.h], [2048, 1536], 'resized to 2048 long side (v3 default)');
   assert.deepEqual(r.lines, ['21/11/2026 14:05', 'GPS: 3.12346, 101.65432  ±8 m']);
   assert.equal(r.meta.capturedAt, '2026-11-21T14:05:00+08:00');
   assert.equal(r.meta.source, 'Camera');
   assert.equal(r.meta.gpsAvailable, true);
   assert.equal(r.meta.fromGalleryLabel, false);
-  assert.ok(r.box.x + r.box.w === 1600 && r.box.y + r.box.h === 1200, 'stamp in bottom-right corner');
+  assert.ok(r.box.x + r.box.w === 2048 && r.box.y + r.box.h === 1536, 'stamp in bottom-right corner');
   assert.ok(r.bandMax > 200, 'white text present in band');
-  assert.ok(r.fullSize < 600000, 'jpeg size reasonable: ' + r.fullSize);
+  assert.ok(r.fullSize < 1200000, 'jpeg size reasonable: ' + r.fullSize);
   assert.ok(r.thumbSize < 40000);
 
   // 2) gallery WITH EXIF date + GPS -> EXIF values, no label, device GPS not needed
   r = await runWatermark(page, 'gallery_exif.jpg', { source: 'Gallery', now, deviceGps: dev });
   save('watermark-2-gallery-exif.jpg', r);
-  assert.deepEqual([r.w, r.h], [1600, 1067]);
+  assert.deepEqual([r.w, r.h], [2048, 1365]);
   assert.deepEqual(r.lines, ['20/11/2026 09:15', 'GPS: 3.21235, 101.75679']);
   assert.equal(r.meta.capturedAt, '2026-11-20T09:15:30+08:00');
   assert.equal(r.meta.gpsFrom, 'exif');
@@ -511,7 +511,7 @@ test('watermark: camera / gallery with EXIF / gallery without EXIF / gallery dat
   // 3) gallery WITHOUT EXIF -> upload time + current GPS + "Dari galeri"
   r = await runWatermark(page, 'gallery_noexif.jpg', { source: 'Gallery', now, deviceGps: dev });
   save('watermark-3-gallery-noexif.jpg', r);
-  assert.deepEqual([r.w, r.h], [1200, 1600], 'portrait kept');
+  assert.deepEqual([r.w, r.h], [1500, 2000], 'portrait kept, never enlarged');
   assert.deepEqual(r.lines, ['21/11/2026 14:05', 'GPS: 3.12346, 101.65432  ±8 m', 'Dari galeri']);
   assert.equal(r.meta.source, 'Gallery');
   assert.equal(r.meta.fromGalleryLabel, true);
